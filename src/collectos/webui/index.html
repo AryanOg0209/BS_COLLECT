@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CollectOS</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="bg" aria-hidden="true"><i class="orb o1"></i><i class="orb o2"></i><i class="orb o3"></i><i class="gridlines"></i></div>
+
+  <svg class="defs" width="0" height="0" aria-hidden="true">
+    <defs><linearGradient id="iconGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e03bd9"/><stop offset="1" stop-color="#5ad1b0"/></linearGradient></defs>
+  </svg>
+
+  <div class="app" id="app" data-collapsed="false">
+    <aside class="sidebar glass" aria-label="Main">
+      <div class="brand">
+        <img src="/static/logo.svg" alt="" width="44" height="44">
+        <div class="brand-text"><strong>CollectOS</strong><small>Who to call today</small></div>
+        <button class="collapse-btn" id="collapse" type="button" aria-label="Collapse sidebar" aria-pressed="false"><span class="icowrap" data-icon="chevron-left"></span></button>
+      </div>
+      <nav>
+        <ul class="nav" id="nav"></ul>
+      </nav>
+      <p class="side-note"><b>Read-only.</b> Served from this computer only. Nothing is sent anywhere.</p>
+    </aside>
+
+    <div class="main">
+      <header class="topbar glass" role="banner">
+        <div class="search">
+          <input id="search" type="search" placeholder="Search customers…" aria-label="Search customers" autocomplete="off">
+          <span class="icowrap" data-icon="search"></span>
+          <div class="search-results glass" id="searchResults" role="listbox" aria-label="Search results"></div>
+        </div>
+        <button class="pill asof" id="asofBtn" type="button" aria-label="Change the as-of date"><span class="icowrap" data-icon="calendar"></span><span><small>as of</small> <b id="asofLabel">…</b></span></button>
+        <div class="topwrap">
+          <button class="pill bell" id="bellBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Alerts"><span class="icowrap" data-icon="bell"></span><span class="count" id="bellCount" hidden>0</span></button>
+          <div class="menu glass" id="bellMenu" role="dialog" aria-label="Alerts"></div>
+        </div>
+        <div class="pill" aria-label="Signed in on this computer"><span class="avatar" id="avatar">Y</span><span id="userName">You</span></div>
+      </header>
+      <div id="banner"></div>
+      <main id="view" class="view" tabindex="-1" aria-live="polite"></main>
+    </div>
+  </div>
+
+  <div id="tooltip" role="tooltip"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

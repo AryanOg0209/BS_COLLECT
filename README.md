@@ -16,7 +16,7 @@ Codename only; not a registered brand. Status: early build, **not yet validated 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                                  # 188 tests
+.venv/bin/pytest                                  # 231 tests
 
 # Build the whole 10-minute demo kit from synthetic data
 .venv/bin/collectos demo ./demo-kit
@@ -35,6 +35,18 @@ collectos snapshot --db data/acme.db                       # day 1 = baseline; r
 collectos trend --db data/acme.db                          # snapshots side by side
 collectos report owner.xlsx --company "Sharma Steel" --db data/acme.db   # adds a Trend sheet once snapshots exist
 ```
+
+### Dashboard
+```bash
+collectos ui --db demo-kit/demo.db        # opens http://127.0.0.1:8765 in your browser
+```
+![Dashboard on synthetic data](docs/dashboard.png)
+
+A dark, glass-style dashboard with true 3D bars, a layered 3D donut, a promise calendar, the explained work queue,
+reminder drafts, trend and an Excel report download. It is **read-only** and served from your computer only:
+bound to `127.0.0.1`, Host-header checked, strict Content-Security-Policy, no external fonts/scripts/requests, and
+imported text is always rendered as text, never HTML. Respects "reduce motion" (OS setting or Settings page).
+Actions (logging a follow-up, resolving a promise) still go through the CLI for now.
 
 `collectos roi-sheet roi.xlsx` writes an editable ROI calculator (live formulas, illustrative defaults) to use with a prospect's own numbers.
 

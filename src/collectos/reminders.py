@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from .ageing import Ageing, Status
-from .models import Promise
+from .ageing import Ageing, Status, assess
+from .models import Invoice, Promise, customer_key
 from .money import format_inr
 
 MAX_LINES_EMAIL = 15
@@ -113,3 +113,19 @@ def _lines(overdue: list[Ageing], limit: int) -> str:
         rest_total = sum((a.outstanding for a in rest), _ZERO)
         rows.append(f"- and {len(rest)} more invoice(s) totalling {format_inr(rest_total)}")
     return "\n".join(rows)
+
+
+def draft_for_customer(
+    invoices: Iterable[Invoice],
+    open_promises: Iterable[Promise],
+    customer: str,
+    sender: Sender,
+    as_of: date,
+) -> Draft:
+    """Build the draft for one customer from plain data (shared by the CLI and the web UI)."""
+    key = customer_key(customer)
+    mine = [i for i in invoices if customer_key(i.customer) == key]
+    if not mine:
+        raise ValueError(f"unknown customer {customer!r}")
+    broken = [p for p in open_promises if p.customer_key == key and p.promised_date < as_of]
+    return draft_reminder(mine[0].customer, [assess(i, as_of) for i in mine], sender, as_of, broken)

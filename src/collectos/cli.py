@@ -8,14 +8,14 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from . import roi, synthetic
+from . import roi, synthetic, web
 from .ageing import Status, assess
 from .dates import DateError, parse_date
 from .importer import ImportFileError, import_invoices, import_rows
 from .models import Invoice, customer_key
 from .money import MoneyError, format_inr, to_money
 from .readers import UnsupportedFile
-from .reminders import Sender, draft_reminder
+from .reminders import Sender, draft_for_customer, draft_reminder
 from .report import write_owner_report
 from .store import CHANNELS, Store, StoreError
 from .workqueue import Queue, build_queue
@@ -76,6 +76,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("out", help="output .xlsx path")
     p.add_argument("--company", required=True)
     p.set_defaults(func=_cmd_report)
+
+    p = sub.add_parser("ui", help="open the read-only dashboard in your browser (served from this computer only)")
+    p.add_argument("--db", default=os.environ.get("COLLECTOS_DB", DEFAULT_DB))
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--no-open", action="store_true", help="do not open a browser window")
+    p.set_defaults(func=_cmd_ui)
 
     p = sub.add_parser("roi-sheet", help="write the customer ROI calculator workbook (editable assumptions, live formulas)")
     p.add_argument("out", help="output .xlsx path")
@@ -151,14 +157,9 @@ def _cmd_resolve(args) -> int:
 
 
 def _cmd_draft(args) -> int:
-    as_of = _as_of(args)
-    key = customer_key(args.customer)
     with _open(args.db) as store:
-        mine = [i for i in store.invoices() if customer_key(i.customer) == key]
-        if not mine:
-            raise StoreError(f"unknown customer {args.customer!r}")
-        broken = [p for p in store.open_promises() if p.customer_key == key and p.promised_date < as_of]
-    draft = draft_reminder(mine[0].customer, [assess(i, as_of) for i in mine], Sender(args.sender, args.company), as_of, broken)
+        draft = draft_for_customer(store.invoices(), store.open_promises(), args.customer,
+                                   Sender(args.sender, args.company), _as_of(args))
     print(f"[template: {draft.template}]\n\nSubject: {draft.subject}\n\n{draft.email_body}\n\n--- WhatsApp version ---\n{draft.whatsapp_text}")
     return 0
 
@@ -172,6 +173,11 @@ def _cmd_report(args) -> int:
     path = write_owner_report(args.out, company=args.company, as_of=as_of, invoices=invoices, queue=queue,
                               open_promises=promises, followups=followups, snapshots=snapshots)
     print(f"Wrote {path}")
+    return 0
+
+
+def _cmd_ui(args) -> int:
+    web.serve(args.db, port=args.port, open_browser=not args.no_open)
     return 0
 
 
