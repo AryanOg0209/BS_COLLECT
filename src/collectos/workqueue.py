@@ -5,7 +5,7 @@ appears as a human-readable reason, so a person can disagree with it and tune
 QueueRules instead of trusting a black box.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -33,6 +33,18 @@ class QueueRules:
     cooldown_days: int = 3  # do not chase again this soon after a contact
     call_if_days_over: int = 30
     call_if_amount: Decimal = Decimal("50000")
+    # promise record: a customer who broke at least half of their (resolved) promises gets a visible bump
+    reliability_min_promises: int = 2
+    unreliable_points: int = 10
+    over_limit_points: int = 10
+    # escalation ladder: the stage is a suggestion for a person, never an automatic action
+    owner_call_days: int = 60
+    review_credit_days: int = 90
+    owner_call_amount: Decimal = Decimal("200000")
+    review_credit_broken: int = 3
+
+
+STAGES = {1: "Friendly reminder", 2: "Firm follow-up", 3: "Owner call", 4: "Review credit terms"}
 
 
 @dataclass(frozen=True)
@@ -46,6 +58,15 @@ class QueueItem:
     max_days_overdue: int
     days_since_contact: int | None
     broken_promises: tuple[Promise, ...]
+    stage: int = 1
+    stage_label: str = STAGES[1]
+    stage_why: str = ""
+    disputed_overdue: Decimal = Decimal("0.00")
+    credit_limit: Decimal | None = None
+    total_outstanding: Decimal = Decimal("0.00")
+    over_limit: bool = False
+    promises_kept: int = 0
+    promises_broken: int = 0
 
 
 @dataclass(frozen=True)
@@ -60,6 +81,7 @@ class Queue:
     work: list[QueueItem] = field(default_factory=list)
     waiting: list[WaitingItem] = field(default_factory=list)
     promises_to_review: list[WaitingItem] = field(default_factory=list)
+    disputed: list[WaitingItem] = field(default_factory=list)
 
 
 def build_queue(
@@ -68,14 +90,32 @@ def build_queue(
     last_contact: Mapping[str, date],
     promises: Iterable[Promise],
     rules: QueueRules = QueueRules(),
+    *,
+    disputed: Collection[tuple[str, str]] = (),
+    do_not_contact: Collection[str] = (),
+    reliability: Mapping[str, object] = {},
+    credit_limits: Mapping[str, Decimal] = {},
 ) -> Queue:
     """Build today's queue.
 
     last_contact maps customer_key -> date of the latest follow-up.
     promises should be the *open* promises. A promise is pending through its
     promised date and counts as broken from the following day.
+    disputed holds (invoice_no, customer_key) of invoices under an open dispute: they are kept out of
+    the chase list. do_not_contact holds customer keys. reliability maps customer_key to an object with
+    .kept and .broken counts of past promises. credit_limits maps customer_key to a limit.
     """
-    summaries = summarise_by_customer([assess(i, as_of) for i in invoices])
+    results = [assess(i, as_of) for i in invoices]
+    in_dispute = [r for r in results if r.status is not Status.PAID and (r.invoice.invoice_no, customer_key(r.invoice.customer)) in disputed]
+    chase = [r for r in results if r not in in_dispute]
+    summaries = summarise_by_customer(chase)
+    totals = summarise_by_customer(results)
+    disputed_overdue: dict[str, Decimal] = {}
+    for r in in_dispute:
+        if r.status is Status.OVERDUE:
+            k = customer_key(r.invoice.customer)
+            disputed_overdue[k] = disputed_overdue.get(k, Decimal("0.00")) + r.outstanding
+
     open_promises: dict[str, list[Promise]] = {}
     for p in promises:
         open_promises.setdefault(p.customer_key, []).append(p)
@@ -94,6 +134,10 @@ def build_queue(
                 )
             continue
 
+        if key in do_not_contact:
+            queue.waiting.append(WaitingItem(name, summary.overdue, "marked do-not-contact; handle this one outside the daily list"))
+            continue
+
         contact = last_contact.get(key)
         days_since = None if contact is None else (as_of - contact).days
 
@@ -105,7 +149,21 @@ def build_queue(
             queue.waiting.append(WaitingItem(name, summary.overdue, f"contacted {days_since} day(s) ago"))
             continue
 
+        rel = reliability.get(key)
+        kept, past_broken = (getattr(rel, "kept", 0), getattr(rel, "broken", 0)) if rel is not None else (0, 0)
+        total_out = totals[name].outstanding if name in totals else summary.outstanding
+        limit = credit_limits.get(key)
+        over_limit = limit is not None and total_out > limit
+
         score, reasons = _score(summary.overdue, summary.max_days_overdue, broken, days_since, rules)
+        if kept + past_broken >= rules.reliability_min_promises and past_broken * 2 >= kept + past_broken and rules.unreliable_points:
+            score += rules.unreliable_points
+            reasons.append(f"kept {kept} of {kept + past_broken} past promises: +{rules.unreliable_points}")
+        if over_limit and rules.over_limit_points:
+            score += rules.over_limit_points
+            reasons.append(f"over credit limit ({format_inr(total_out)} of {format_inr(limit)}): +{rules.over_limit_points}")
+        stage, why = _stage(summary.overdue, summary.max_days_overdue, len(broken), past_broken, over_limit, rules)
+
         urgent = bool(broken) or summary.max_days_overdue > rules.call_if_days_over or summary.overdue >= rules.call_if_amount
         queue.work.append(
             QueueItem(
@@ -118,13 +176,51 @@ def build_queue(
                 max_days_overdue=summary.max_days_overdue,
                 days_since_contact=days_since,
                 broken_promises=broken,
+                stage=stage,
+                stage_label=STAGES[stage],
+                stage_why=why,
+                disputed_overdue=disputed_overdue.get(key, Decimal("0.00")),
+                credit_limit=limit,
+                total_outstanding=total_out,
+                over_limit=over_limit,
+                promises_kept=kept,
+                promises_broken=past_broken,
             )
         )
+
+    names = {customer_key(r.invoice.customer): r.invoice.customer for r in in_dispute}
+    for key, amount in disputed_overdue.items():
+        queue.disputed.append(WaitingItem(names[key], amount, "overdue invoice(s) in dispute: resolve the dispute before chasing"))
 
     queue.work.sort(key=lambda i: (-i.score, -i.overdue, i.customer.casefold()))
     queue.waiting.sort(key=lambda w: (-w.overdue, w.customer.casefold()))
     queue.promises_to_review.sort(key=lambda w: w.customer.casefold())
+    queue.disputed.sort(key=lambda w: (-w.overdue, w.customer.casefold()))
     return queue
+
+
+def _stage(overdue: Decimal, max_days: int, broken_now: int, broken_before: int, over_limit: bool, rules: QueueRules) -> tuple[int, str]:
+    """Suggested rung on the escalation ladder, with the first reason that put it there."""
+    broken_total = broken_now + broken_before
+    if max_days > rules.review_credit_days:
+        return 4, f"oldest invoice is {max_days} days overdue"
+    if broken_total >= rules.review_credit_broken:
+        return 4, f"{broken_total} broken promises"
+    if over_limit and max_days > rules.owner_call_days:
+        return 4, "over credit limit and more than 60 days overdue"
+    if max_days > rules.owner_call_days:
+        return 3, f"oldest invoice is {max_days} days overdue"
+    if broken_total >= 2:
+        return 3, f"{broken_total} broken promises"
+    if over_limit:
+        return 3, "over credit limit"
+    if overdue >= rules.owner_call_amount:
+        return 3, f"{format_inr(overdue)} overdue"
+    if max_days > 30:
+        return 2, f"oldest invoice is {max_days} days overdue"
+    if broken_total >= 1:
+        return 2, "a promise was broken"
+    return 1, "recently overdue"
 
 
 def _score(overdue: Decimal, max_days: int, broken: tuple[Promise, ...], days_since: int | None, rules: QueueRules):

@@ -69,3 +69,38 @@ def test_not_due_paid_and_undated_invoices_are_ignored():
         draft_reminder("Acme", [not_due, paid], SENDER, TODAY)
     d = draft_reminder("Acme", [not_due, paid, ageing("O", 3)], SENDER, TODAY)
     assert "- O:" in d.email_body and "- N:" not in d.email_body and "- P:" not in d.email_body
+
+
+# ---- Hinglish -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("days, broken, template", [(10, False, FRIENDLY), (90, False, FIRM), (10, True, PROMISE)])
+def test_hinglish_uses_the_same_template_choice_and_facts(days, broken, template):
+    promises = [Promise(1, "Acme", customer_key("Acme"), date(2026, 10, 10), Decimal("20000"), "open")] if broken else []
+    en = draft_reminder("Acme", [ageing("INV-1", days, "54000")], SENDER, TODAY, broken_promises=promises)
+    hi = draft_reminder("Acme", [ageing("INV-1", days, "54000")], SENDER, TODAY, broken_promises=promises, language="hinglish")
+    assert hi.template == en.template == template
+    for fact in ("INV-1", "₹54,000.00", "Sharma Steel Pvt Ltd", "Rohit"):
+        assert fact in hi.email_body and fact in hi.whatsapp_text
+    assert hi.email_body.startswith("Namaste Acme team,") and "Dhanyavaad" in hi.email_body
+    assert f"{days} din late" in hi.email_body and "days overdue" not in hi.email_body
+    assert hi.email_body != en.email_body
+
+
+def test_hinglish_has_no_threats_or_legal_claims():
+    for days, promises in ((10, []), (90, []), (10, [Promise(1, "Acme", customer_key("Acme"), date(2026, 10, 10), None, "open")])):
+        d = draft_reminder("Acme", [ageing("INV-1", days)], SENDER, TODAY, broken_promises=promises, language="hinglish")
+        text = (d.email_body + d.whatsapp_text + d.subject).lower()
+        for banned in ("legal", "court", "kanoon", "byaaj", "interest", "penalty", "jurmana", "notice", "police"):
+            assert banned not in text
+
+
+def test_hinglish_long_lists_truncate_correctly():
+    items = [ageing(f"INV-{i:02d}", 100 - i, "100") for i in range(8)]
+    d = draft_reminder("Acme", items, SENDER, TODAY, language="hinglish")
+    assert "- aur 3 invoice(s), kul ₹300.00" in d.whatsapp_text
+
+
+def test_unknown_language_is_refused():
+    with pytest.raises(ValueError, match="language must be one of"):
+        draft_reminder("Acme", [ageing("INV-1", 10)], SENDER, TODAY, language="klingon")
