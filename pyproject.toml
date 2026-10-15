@@ -9,6 +9,9 @@ description = "Receivables follow-up and ageing toolkit for Indian B2B SMEs (loc
 requires-python = ">=3.12"
 dependencies = ["openpyxl>=3.1"]
 
+[project.scripts]
+collectos = "collectos.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
