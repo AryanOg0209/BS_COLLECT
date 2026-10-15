@@ -223,7 +223,7 @@ def test_msme_setting_switches_the_informational_flag_on(server):
     assert post(server, "/api/setting", {"key": "msme_supplier", "value": "1"})[0] == 200
     d = overview(server)
     assert d["settings"]["msme_supplier"] is True and d["kpi"]["msme_past_window"] == 3 and "CA" in d["settings"]["msme_caution"]
-    assert any(i["past_msme_window"] for i in call(server, f"/api/customer?name=Acme&{ASOF}")[2]["invoices"])
+    assert any(i["past_msme_window"] for i in call(server, f"/api/customer?name=Acme%20Traders&{ASOF}")[2]["invoices"])
     assert post(server, "/api/setting", {"key": "msme_supplier", "value": "maybe"})[0] == 400
     assert post(server, "/api/setting", {"key": "bogus", "value": "1"})[0] == 400
 
