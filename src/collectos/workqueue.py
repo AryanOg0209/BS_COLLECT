@@ -162,7 +162,7 @@ def build_queue(
         if over_limit and rules.over_limit_points:
             score += rules.over_limit_points
             reasons.append(f"over credit limit ({format_inr(total_out)} of {format_inr(limit)}): +{rules.over_limit_points}")
-        stage, why = _stage(summary.overdue, summary.max_days_overdue, len(broken), past_broken, over_limit, rules)
+        stage, why = stage_for(summary.overdue, summary.max_days_overdue, len(broken), past_broken, over_limit, rules)
 
         urgent = bool(broken) or summary.max_days_overdue > rules.call_if_days_over or summary.overdue >= rules.call_if_amount
         queue.work.append(
@@ -199,7 +199,7 @@ def build_queue(
     return queue
 
 
-def _stage(overdue: Decimal, max_days: int, broken_now: int, broken_before: int, over_limit: bool, rules: QueueRules) -> tuple[int, str]:
+def stage_for(overdue: Decimal, max_days: int, broken_now: int, broken_before: int, over_limit: bool, rules: QueueRules) -> tuple[int, str]:
     """Suggested rung on the escalation ladder, with the first reason that put it there."""
     broken_total = broken_now + broken_before
     if max_days > rules.review_credit_days:

@@ -63,7 +63,7 @@ class ImportReport:
         return not self.errors
 
 
-def import_invoices(path: str | Path, default_credit_days: int | None = None) -> ImportReport:
+def import_invoices(path: str | Path, default_credit_days: int | None = None, source: str | None = None) -> ImportReport:
     """Read a CSV/XLSX file and return validated invoices and a full issue report.
 
     Every worksheet is searched for the invoice table; the first one that has it is used
@@ -71,7 +71,7 @@ def import_invoices(path: str | Path, default_credit_days: int | None = None) ->
     invoice_date + N days; each filled invoice number is listed in the report.
     """
     path = Path(path)
-    return import_sheets(read_sheets(path), source=path.name, default_credit_days=default_credit_days)
+    return import_sheets(read_sheets(path), source=source or path.name, default_credit_days=default_credit_days)
 
 
 def import_rows(rows: RawRows, source: str = "<memory>", default_credit_days: int | None = None) -> ImportReport:

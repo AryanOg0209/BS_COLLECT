@@ -4,10 +4,12 @@ Safety properties (each is covered by a test):
 - binds to the loopback interface only, never to the network;
 - rejects requests whose Host header is not this server (blocks DNS-rebinding);
 - no CORS headers, a strict Content-Security-Policy, and nothing loaded from other origins;
-- reads are plain GETs. The only writes are three small JSON POSTs (log a follow-up, resolve a
-  promise, take a snapshot). Each needs a per-run secret token in a custom header (which a
-  cross-site page cannot send without a CORS preflight we never grant), a same-origin Origin
-  header, a JSON content type and a small body. `read_only=True` disables writes entirely;
+- reads are plain GETs. Writes are a fixed list of POSTs (see WRITE_ROUTES): JSON for small
+  actions, and raw-file uploads for imports and bank statements. Each needs a per-run secret
+  token in a custom header (which a cross-site page cannot send without a CORS preflight we
+  never grant), a same-origin Origin header, the exact content type for its kind and a size
+  cap. Uploaded files live in a private temp folder under random names and are deleted after
+  use. `read_only=True` disables writes entirely;
 - static files come from a fixed allow-list, so there is no path traversal.
 All text shown in the page comes from imported files and is untrusted: the client renders
 it with textContent only, never as HTML.
@@ -22,14 +24,19 @@ from datetime import date, datetime
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from .ageing import CURRENT, DEFAULT_EDGES, NO_DUE_DATE, Status, assess, bucket_labels, summarise_by_customer
+from .contacts import mailto_link, tel_link, whatsapp_link
 from .dates import DateError, parse_date
+from .importer import import_invoices
+from .matcher import StatementError, parse_statement, suggest
 from .money import MoneyError, to_money
-from .reminders import Sender, draft_for_customer
+from .readers import read_sheets
+from .reminders import LANGUAGES, Sender, draft_for_customer
 from .report import write_owner_report
 from .store import Store, StoreError
+from .uploads import MAX_UPLOAD, UploadError, UploadStore
+from .overview import _m, build_overview, customer_detail
 from .workqueue import build_queue
 
 WEB_DIR = Path(__file__).parent / "webui"
@@ -38,85 +45,23 @@ STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.css": "text/css; 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 _ZERO = Decimal("0.00")
-WRITE_ROUTES = {"/api/followup", "/api/promise/resolve", "/api/snapshot"}
+# path -> (kind, handler name). kind "json" bodies are small objects; kind "upload" bodies are raw files.
+WRITE_ROUTES = {
+    "/api/followup": ("json", "_post_followup"),
+    "/api/promise/resolve": ("json", "_post_resolve"),
+    "/api/snapshot": ("json", "_post_snapshot"),
+    "/api/customer/update": ("json", "_post_customer"),
+    "/api/dispute/open": ("json", "_post_dispute_open"),
+    "/api/dispute/resolve": ("json", "_post_dispute_resolve"),
+    "/api/setting": ("json", "_post_setting"),
+    "/api/invoice/settle": ("json", "_post_settle"),
+    "/api/import/apply": ("json", "_post_import_apply"),
+    "/api/import/preview": ("upload", "_post_import_preview"),
+    "/api/statement/match": ("upload", "_post_statement"),
+}
+CONTENT_TYPES = {"json": "application/json", "upload": "application/octet-stream"}
 MAX_BODY = 64 * 1024
 TOKEN_HEADER = "X-CollectOS-Token"
-
-
-def _m(value: Decimal | None) -> str | None:
-    return None if value is None else f"{value:.2f}"
-
-
-def build_overview(store: Store, as_of: date, db_name: str = "") -> dict:
-    """Everything the dashboard needs in one JSON-serialisable dict. Money is sent as exact strings."""
-    invoices = store.invoices()
-    results = [assess(i, as_of) for i in invoices]
-    open_ = [r for r in results if r.status not in (Status.PAID, Status.OVERPAID)]
-    overdue = [r for r in open_ if r.status is Status.OVERDUE]
-    promises = store.open_promises()
-    queue = build_queue(invoices, as_of, store.last_contacts(), promises)
-    snapshots = store.snapshots()
-
-    total_outstanding = sum((r.outstanding for r in open_), _ZERO)
-    total_overdue = sum((r.outstanding for r in overdue), _ZERO)
-    buckets = [CURRENT, *bucket_labels(DEFAULT_EDGES), NO_DUE_DATE]
-    ageing = [
-        {"bucket": b,
-         "amount": _m(sum((r.outstanding for r in open_ if r.bucket == b), _ZERO)),
-         "count": sum(1 for r in open_ if r.bucket == b)}
-        for b in buckets
-    ]
-    customers = sorted(summarise_by_customer(results).values(), key=lambda s: (-s.overdue, s.customer.casefold()))
-    broken = [p for p in promises if p.promised_date < as_of]
-    last_week = [f for f in store.followups() if (as_of - datetime.fromisoformat(f.ts).date()).days in range(0, 7)]
-
-    return {
-        "as_of": as_of.isoformat(),
-        "db_name": db_name,
-        "kpi": {
-            "total_outstanding": _m(total_outstanding),
-            "overdue": _m(total_overdue),
-            "overdue_share": None if total_outstanding == 0 else f"{total_overdue / total_outstanding:.4f}",
-            "open_invoices": len(open_),
-            "overdue_invoices": len(overdue),
-            "customers_overdue": len({r.invoice.customer for r in overdue}),
-            "to_contact_today": len(queue.work),
-            "waiting": len(queue.waiting),
-            "broken_promises": len(broken),
-            "followups_7d": len(last_week),
-        },
-        "ageing": ageing,
-        "trend": [
-            {"as_of": s.as_of.isoformat(), "total_outstanding": _m(s.total_outstanding), "overdue": _m(s.overdue),
-             "over60": _m(s.over60), "over90": _m(s.over90), "followups_7d": s.followups_7d,
-             "broken_promises": s.broken_promises, "payments_observed": _m(s.payments_observed)}
-            for s in snapshots
-        ],
-        "queue": [
-            {"customer": q.customer, "action": q.action, "score": q.score, "overdue": _m(q.overdue),
-             "outstanding": _m(q.outstanding), "oldest_days": q.max_days_overdue,
-             "days_since_contact": q.days_since_contact, "reasons": list(q.reasons),
-             "broken_promise_dates": [p.promised_date.isoformat() for p in q.broken_promises]}
-            for q in queue.work
-        ],
-        "waiting": [{"customer": w.customer, "overdue": _m(w.overdue), "reason": w.reason} for w in queue.waiting],
-        "review": [{"customer": w.customer, "reason": w.reason} for w in queue.promises_to_review],
-        "promises": [
-            {"id": p.id, "customer": p.customer, "date": p.promised_date.isoformat(),
-             "amount": _m(p.promised_amount), "state": "broken" if p.promised_date < as_of else "pending"}
-            for p in sorted(promises, key=lambda p: (p.promised_date, p.customer.casefold()))
-        ],
-        "customers": [
-            {"customer": s.customer, "outstanding": _m(s.outstanding), "overdue": _m(s.overdue),
-             "open_invoices": s.open_invoices, "overdue_invoices": s.overdue_invoices,
-             "oldest_days": s.max_days_overdue, "buckets": {k: _m(v) for k, v in s.by_bucket.items()}}
-            for s in customers
-        ],
-        "followups": [
-            {"customer": f.customer, "ts": f.ts, "channel": f.channel, "outcome": f.outcome, "actor": f.actor}
-            for f in reversed(store.followups()[-15:])
-        ],
-    }
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -166,6 +111,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._overview(query)
             if url.path == "/api/draft":
                 return self._draft(query)
+            if url.path == "/api/customer":
+                return self._customer(query)
+            if url.path == "/api/activity":
+                return self._activity(query)
+            if url.path == "/backup.db":
+                return self._backup()
             if url.path == "/report.xlsx":
                 return self._report(query)
         except DateError as exc:
@@ -182,9 +133,11 @@ class _Handler(BaseHTTPRequestHandler):
     do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _method_not_allowed  # noqa: N815
 
     def do_POST(self):  # noqa: N802
-        path = urlparse(self.path).path
-        if path not in WRITE_ROUTES:
+        url = urlparse(self.path)
+        route = WRITE_ROUTES.get(url.path)
+        if route is None:
             return self._method_not_allowed()
+        kind, handler_name = route
         self.close_connection = True  # never leave an unread request body on a kept-alive connection
         if self.server.read_only:
             return self._error(405, "this dashboard is running in read-only mode")
@@ -196,25 +149,36 @@ class _Handler(BaseHTTPRequestHandler):
         supplied = self.headers.get(TOKEN_HEADER, "")
         if not secrets.compare_digest(supplied.encode(), self.server.token.encode()):
             return self._error(403, "missing or wrong session token; reload the page")
-        if not (self.headers.get("Content-Type", "").split(";")[0].strip().lower() == "application/json"):
-            return self._error(415, "send JSON")
+        if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != CONTENT_TYPES[kind]:
+            return self._error(415, "send JSON" if kind == "json" else "send the raw file as application/octet-stream")
         try:
             length = int(self.headers.get("Content-Length", ""))
         except ValueError:
             return self._error(411, "Content-Length required")
-        if not 0 <= length <= MAX_BODY:
-            return self._error(413, f"body must be at most {MAX_BODY} bytes")
+        limit = MAX_BODY if kind == "json" else MAX_UPLOAD
+        if not 0 <= length <= limit:
+            return self._error(413, f"body must be at most {limit} bytes")
+        query = {k: v[0] for k, v in parse_qs(url.query).items()}
         try:
-            body = json.loads(self.rfile.read(length) or b"{}")
-            if not isinstance(body, dict):
-                raise ValueError("body must be a JSON object")
-            handler = {"/api/followup": self._post_followup, "/api/promise/resolve": self._post_resolve,
-                       "/api/snapshot": self._post_snapshot}[path]
-            self._json(200, handler(body))
+            data = self.rfile.read(length)
+            handler = getattr(self, handler_name)
+            if kind == "json":
+                body = json.loads(data or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("body must be a JSON object")
+                result = handler(body)
+            else:
+                result = handler(data, query)
+            self._json(200, result)
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._error(400, "body is not valid JSON")
         except (StoreError, DateError, MoneyError, ValueError, KeyError, TypeError) as exc:
             self._error(400, f"missing field {exc}" if isinstance(exc, KeyError) else str(exc))
+        except Exception:  # an unreadable or hostile file must never produce a stack trace for the page
+            if kind == "upload":
+                self._error(400, "could not read that file; check that it is a real .csv or .xlsx export")
+            else:
+                raise
 
     # -- write handlers (each validates through the same Store rules as the CLI) ------
     def _post_followup(self, body: dict) -> dict:
@@ -242,6 +206,130 @@ class _Handler(BaseHTTPRequestHandler):
         return {"id": snap.id, "as_of": snap.as_of.isoformat(), "overdue": _m(snap.overdue),
                 "payments_observed": _m(snap.payments_observed)}
 
+    def _post_customer(self, body: dict) -> dict:
+        name = _text(body, "customer", required=True)
+        changes: dict = {}
+        for key in ("contact_person", "phone", "email", "preferred_channel", "notes"):
+            if key in body:
+                changes[key] = _text(body, key, limit=2000)
+        if "credit_limit" in body:
+            changes["credit_limit"] = _text(body, "credit_limit") or None
+        if "do_not_contact" in body:
+            changes["do_not_contact"] = body["do_not_contact"]
+        with Store(self.server.db_path) as store:
+            p = store.update_customer(name, _actor(body), **changes)
+        return {"customer": p.name, "phone": p.phone, "email": p.email, "do_not_contact": p.do_not_contact,
+                "credit_limit": None if p.credit_limit is None else f"{p.credit_limit:.2f}"}
+
+    def _post_dispute_open(self, body: dict) -> dict:
+        with Store(self.server.db_path) as store:
+            dispute_id = store.open_dispute(_text(body, "invoice_no", required=True), _text(body, "customer", required=True),
+                                            _text(body, "category", required=True), _actor(body),
+                                            note=_text(body, "note"), owner=_text(body, "owner", limit=120))
+        return {"id": dispute_id}
+
+    def _post_dispute_resolve(self, body: dict) -> dict:
+        dispute_id = body["id"]
+        if not isinstance(dispute_id, int) or isinstance(dispute_id, bool):
+            raise ValueError("id must be a whole number")
+        with Store(self.server.db_path) as store:
+            store.resolve_dispute(dispute_id, _actor(body), _text(body, "note"))
+        return {"ok": True}
+
+    def _post_setting(self, body: dict) -> dict:
+        with Store(self.server.db_path) as store:
+            store.set_setting(_text(body, "key", required=True), _text(body, "value", required=True), _actor(body))
+        return {"ok": True}
+
+    def _post_settle(self, body: dict) -> dict:
+        raw = body["items"]
+        if not isinstance(raw, list) or not all(isinstance(i, dict) for i in raw):
+            raise ValueError("items must be a list of {invoice_no, customer}")
+        items = [(_text(i, "invoice_no", required=True), _text(i, "customer", required=True)) for i in raw]
+        with Store(self.server.db_path) as store:
+            total = store.settle_invoices(items, _actor(body), _text(body, "note"))
+        return {"settled": len(items), "total": _m(total)}
+
+    def _credit_days(self, value) -> int | None:
+        if value in (None, ""):
+            return None
+        try:
+            days = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("credit_days must be a whole number") from None
+        if not 0 <= days <= 365 or isinstance(value, bool):
+            raise ValueError("credit_days must be between 0 and 365")
+        return days
+
+    def _post_import_preview(self, data: bytes, query: dict) -> dict:
+        upload = self.server.uploads.save(data, unquote(self.headers.get("X-Filename", "")))
+        try:
+            report = import_invoices(upload.path, default_credit_days=self._credit_days(query.get("credit_days")), source=upload.name)
+            with Store(self.server.db_path) as store:
+                diff = store.diff_import(report)
+        except BaseException:
+            self.server.uploads.discard(upload.id)
+            raise
+        return {
+            "upload_id": upload.id, "filename": upload.name, "sheet": report.sheet,
+            "valid": len(report.invoices), "duplicates": len(report.duplicates), "skipped_rows": len(report.skipped_rows),
+            "error_count": len(report.errors), "errors": [{"row": e.row_no, "message": e.message} for e in report.errors[:50]],
+            "warnings": report.warnings, "filled_due_dates": len(report.filled_due_dates),
+            "diff": {
+                "new_count": len(diff.new), "new": [{"invoice_no": n, "customer": c, "amount": _m(a)} for n, c, a in diff.new[:20]],
+                "changed_count": len(diff.changed),
+                "changed": [{"invoice_no": c.invoice_no, "customer": c.customer, "paid_before": _m(c.paid_before), "paid_after": _m(c.paid_after),
+                             "delta": _m(c.paid_delta)} for c in diff.changed[:50]],
+                "unchanged": diff.unchanged, "payments_seen": _m(diff.payments_seen),
+                "reversals": [{"invoice_no": c.invoice_no, "customer": c.customer, "delta": _m(c.paid_delta)} for c in diff.reversals[:50]],
+                "missing_count": len(diff.missing), "missing_total": _m(sum((o for _, _, o in diff.missing), _ZERO)),
+                "missing": [{"invoice_no": n, "customer": c, "outstanding": _m(o)} for n, c, o in diff.missing[:200]],
+            },
+        }
+
+    def _post_import_apply(self, body: dict) -> dict:
+        upload = self.server.uploads.get(_text(body, "upload_id", required=True))
+        report = import_invoices(upload.path, default_credit_days=self._credit_days(body.get("credit_days")), source=upload.name)
+        actor = _actor(body)
+        with Store(self.server.db_path) as store:
+            diff = store.diff_import(report)
+            result = store.apply_import(report, actor, allow_errors=body.get("allow_errors") is True)
+            snapshot = store.take_snapshot(date.today(), actor) if body.get("take_snapshot") is True else None
+        self.server.uploads.discard(upload.id)
+        return {
+            "import_id": result.import_id, "inserted": result.inserted, "updated": result.updated, "unchanged": result.unchanged,
+            "warnings": result.warnings, "payments_seen": _m(diff.payments_seen),
+            "snapshot": None if snapshot is None else {"as_of": snapshot.as_of.isoformat(), "payments_observed": _m(snapshot.payments_observed)},
+            "missing": [{"invoice_no": n, "customer": c, "outstanding": _m(o)} for n, c, o in diff.missing[:200]],
+            "missing_count": len(diff.missing),
+        }
+
+    def _post_statement(self, data: bytes, query: dict) -> dict:
+        upload = self.server.uploads.save(data, unquote(self.headers.get("X-Filename", "")))
+        try:
+            report, last_error = None, None
+            for _, rows in read_sheets(upload.path):
+                try:
+                    report = parse_statement(rows)
+                    break
+                except StatementError as exc:
+                    last_error = exc
+            if report is None:
+                raise last_error or StatementError("no statement found in that file")
+        finally:
+            self.server.uploads.discard(upload.id)
+        as_of = self._as_of(query)
+        with Store(self.server.db_path) as store:
+            suggestions = suggest(report.credits[:500], store.invoices(), as_of, store.open_promises())
+        return {
+            "credits": len(report.credits), "skipped": report.skipped, "errors": report.errors[:20], "truncated": len(report.credits) > 500,
+            "suggestions": [{
+                "row": s.credit.row_no, "date": None if s.credit.on is None else s.credit.on.isoformat(), "narration": s.credit.narration,
+                "reference": s.credit.reference, "amount": _m(s.credit.amount), "confidence": s.confidence, "customer": s.customer,
+                "invoice_nos": list(s.invoice_nos), "matched_outstanding": _m(s.matched_outstanding), "reasons": list(s.reasons),
+                "promise_ids": list(s.promise_ids)} for s in suggestions],
+        }
+
     # -- handlers --------------------------------------------------------------
     def _static(self, name: str) -> None:
         if name not in STATIC_FILES:  # an allow-list, so there is no path to traverse
@@ -263,17 +351,52 @@ class _Handler(BaseHTTPRequestHandler):
         customer = query.get("customer", "")
         if not customer:
             return self._error(400, "customer is required")
+        language = query.get("language") or "en"
+        if language not in LANGUAGES:
+            return self._error(400, f"language must be one of: {', '.join(LANGUAGES)}")
         sender = Sender(query.get("sender") or "Your name", query.get("company") or "Your company")
         with Store(self.server.db_path) as store:
-            draft = draft_for_customer(store.invoices(), store.open_promises(), customer, sender, self._as_of(query))
-        self._json(200, {"template": draft.template, "subject": draft.subject, "email": draft.email_body,
-                         "whatsapp": draft.whatsapp_text})
+            draft = draft_for_customer(store.invoices(), store.open_promises(), customer, sender, self._as_of(query), language)
+            profile = store.customer_profile(customer)
+        blocked = profile.do_not_contact
+        self._json(200, {
+            "template": draft.template, "subject": draft.subject, "email": draft.email_body, "whatsapp": draft.whatsapp_text, "language": language,
+            "contact": {"person": profile.contact_person, "phone": profile.phone, "email": profile.email, "preferred": profile.preferred_channel,
+                        "do_not_contact": blocked},
+            # links only open the person's own WhatsApp / mail / phone app with the text filled in; nothing is sent from here
+            "links": None if blocked else {"whatsapp": whatsapp_link(profile.phone, draft.whatsapp_text),
+                                           "email": mailto_link(profile.email, draft.subject, draft.email_body), "tel": tel_link(profile.phone)},
+        })
+
+    def _customer(self, query: dict) -> None:
+        name = query.get("name", "")
+        if not name:
+            return self._error(400, "name is required")
+        with Store(self.server.db_path) as store:
+            self._json(200, customer_detail(store, name, self._as_of(query)))
+
+    def _activity(self, query: dict) -> None:
+        try:
+            limit = int(query.get("limit", "100"))
+            before = int(query["before"]) if query.get("before") else None
+        except ValueError:
+            return self._error(400, "limit and before must be whole numbers")
+        with Store(self.server.db_path) as store:
+            self._json(200, {"entries": store.activity(limit, before)})
+
+    def _backup(self) -> None:
+        with Store(self.server.db_path) as store, tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "backup.db"
+            store.backup(target)
+            data = target.read_bytes()
+        self._send(200, data, "application/octet-stream",
+                   {"Content-Disposition": f'attachment; filename="collectos-backup-{date.today().isoformat()}.db"'})
 
     def _report(self, query: dict) -> None:
         as_of, company = self._as_of(query), (query.get("company") or "CollectOS")[:80]
         with Store(self.server.db_path) as store, tempfile.TemporaryDirectory() as tmp:
             invoices, promises = store.invoices(), store.open_promises()
-            queue = build_queue(invoices, as_of, store.last_contacts(), promises)
+            queue = _queue_for_report(store, invoices, as_of, promises)
             path = write_owner_report(Path(tmp) / "report.xlsx", company=company, as_of=as_of, invoices=invoices,
                                       queue=queue, open_promises=promises, followups=store.followups(),
                                       snapshots=store.snapshots())
@@ -308,8 +431,13 @@ class DashboardServer(ThreadingHTTPServer):
         self.db_path = str(db_path)
         self.read_only = read_only
         self.token = secrets.token_urlsafe(32)  # new on every start; never written to disk
+        self.uploads = UploadStore()
         actual = self.server_address[1]
         self.allowed_hosts = {f"127.0.0.1:{actual}", f"localhost:{actual}"}
+
+    def server_close(self) -> None:
+        super().server_close()
+        self.uploads.close()  # uploaded files never outlive the server
 
     @property
     def url(self) -> str:
@@ -334,3 +462,9 @@ def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True, read
         print("\nStopped.")
     finally:
         server.server_close()
+
+
+def _queue_for_report(store: Store, invoices, as_of: date, promises):
+    from .overview import _queue_inputs
+
+    return _queue_inputs(store, as_of)[0]
