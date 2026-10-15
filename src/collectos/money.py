@@ -67,3 +67,11 @@ def format_inr(amount: Decimal) -> str:
     if head:
         groups.insert(0, head)
     return f"{sign}₹{','.join(groups + [tail])}.{frac}"
+
+
+def to_paise(amount: Decimal) -> int:
+    return int(to_money(amount).scaleb(2))
+
+
+def from_paise(paise: int) -> Decimal:
+    return to_money(Decimal(paise).scaleb(-2))

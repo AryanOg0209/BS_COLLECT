@@ -16,11 +16,13 @@ from decimal import Decimal
 from pathlib import Path
 
 from .ageing import Status, assess
+from .errors import StoreError
 from .importer import ImportReport
 from .models import Invoice, Promise, customer_key
-from .money import to_money
+from .money import from_paise, to_money, to_paise
+from .store_extras import SCHEMA_V4, ExtrasMixin
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA_V1 = """
 CREATE TABLE imports (
@@ -130,11 +132,7 @@ CREATE TRIGGER snapshots_no_delete BEFORE DELETE ON snapshots
 BEGIN SELECT RAISE(ABORT, 'snapshots is append-only'); END;
 """
 
-_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3}
-
-
-class StoreError(RuntimeError):
-    pass
+_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: SCHEMA_V4}
 
 
 @dataclass
@@ -196,19 +194,11 @@ class AuditEntry:
     reason: str
 
 
-def to_paise(amount: Decimal) -> int:
-    return int(to_money(amount).scaleb(2))
-
-
-def from_paise(paise: int) -> Decimal:
-    return to_money(Decimal(paise).scaleb(-2))
-
-
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class Store:
+class Store(ExtrasMixin):
     def __init__(self, path: str | Path = ":memory:", now: Callable[[], datetime] = _utc_now):
         self._now = now
         self._db = sqlite3.connect(str(path))
@@ -321,7 +311,7 @@ class Store:
 
     def _missing(self, seen_ids: set[int]) -> list[str]:
         """Open invoices known to the store but absent from this import. Never auto-closed."""
-        rows = self._db.execute("SELECT id, invoice_no, customer FROM invoices ORDER BY id").fetchall()
+        rows = self._db.execute("SELECT id, invoice_no, customer FROM invoices WHERE amount_paise > paid_paise ORDER BY id").fetchall()
         return [f"{r['invoice_no']} ({r['customer']})" for r in rows if r["id"] not in seen_ids]
 
     def _audit(self, ts, actor, action, entity_id, before, after, reason, entity="invoice") -> None:
@@ -508,7 +498,7 @@ class Store:
 
     def _payments_between(self, after_id: int, up_to_id: int) -> Decimal:
         rows = self._db.execute(
-            "SELECT before_json, after_json FROM audit_log WHERE action = 'invoice.updated' AND id > ? AND id <= ?",
+            "SELECT before_json, after_json FROM audit_log WHERE action IN ('invoice.updated', 'invoice.settled') AND id > ? AND id <= ?",
             (after_id, up_to_id),
         ).fetchall()
         paise = 0

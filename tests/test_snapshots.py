@@ -133,5 +133,5 @@ def test_v2_database_migrates_to_v3(tmp_path):
     raw.commit()
     raw.close()
     with Store(db, now=Clock()) as s:
-        assert s._db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert s._db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
         assert s.take_snapshot(D0, actor="a").open_invoices == 0
