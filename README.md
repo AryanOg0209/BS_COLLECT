@@ -16,8 +16,8 @@ Codename only; not a registered brand. Status: early build, validating with real
 |---|-------|--------|
 | 0 | Scaffold, tooling | done |
 | 1 | Money + invoice model + ageing rules (pure, no I/O) | done |
-| 2 | Import pipeline (CSV/Excel/Tally export → validated invoices) | next |
-| 3 | SQLite persistence + audit log | planned |
+| 2 | Import pipeline (CSV/Excel/Tally-style export → validated invoices + issue report) | done |
+| 3 | SQLite persistence + audit log | next |
 | 4 | Work queue (priority + reasons) + promise-to-pay log | planned |
 | 5 | Reminder drafts + owner report (Excel) | planned |
 | 6 | CLI + synthetic demo data | planned |
