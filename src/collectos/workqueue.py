@@ -59,7 +59,7 @@ class WaitingItem:
 class Queue:
     work: list[QueueItem] = field(default_factory=list)
     waiting: list[WaitingItem] = field(default_factory=list)
-    promises_to_review: list[str] = field(default_factory=list)
+    promises_to_review: list[WaitingItem] = field(default_factory=list)
 
 
 def build_queue(
@@ -90,7 +90,7 @@ def build_queue(
         if summary.overdue <= 0:
             if mine:
                 queue.promises_to_review.append(
-                    f"{name}: has an open promise but nothing overdue; mark it kept or cancelled"
+                    WaitingItem(name, summary.overdue, "has an open promise but nothing overdue; mark it kept or cancelled")
                 )
             continue
 
@@ -123,7 +123,7 @@ def build_queue(
 
     queue.work.sort(key=lambda i: (-i.score, -i.overdue, i.customer.casefold()))
     queue.waiting.sort(key=lambda w: (-w.overdue, w.customer.casefold()))
-    queue.promises_to_review.sort()
+    queue.promises_to_review.sort(key=lambda w: w.customer.casefold())
     return queue
 
 

@@ -19,8 +19,8 @@ Codename only; not a registered brand. Status: early build, validating with real
 | 2 | Import pipeline (CSV/Excel/Tally-style export → validated invoices + issue report) | done |
 | 3 | SQLite persistence + append-only audit log | done |
 | 4 | Work queue (transparent priority rules + reasons) + follow-up / promise-to-pay log | done |
-| 5 | Reminder drafts + owner report (Excel) | next |
-| 6 | CLI + synthetic demo data | planned |
+| 5 | Reminder drafts (text only, nothing sent) + owner report (Excel) | done |
+| 6 | CLI + synthetic demo data | next |
 
 ## Develop
 ```bash

@@ -118,7 +118,7 @@ def test_stale_contact_adds_points():
 
 def test_open_promise_with_nothing_overdue_is_flagged_for_review():
     q = build([inv("A", "Acme", date(2026, 12, 1))], promises=[promise("Acme", days_ago(2))])
-    assert q.work == [] and "mark it kept or cancelled" in q.promises_to_review[0]
+    assert q.work == [] and "mark it kept or cancelled" in q.promises_to_review[0].reason
 
 
 def test_paid_invoices_never_appear():
