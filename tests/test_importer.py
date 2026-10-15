@@ -175,3 +175,42 @@ def test_date_formats(text, expected):
 def test_bad_dates(bad):
     with pytest.raises(DateError):
         parse_date(bad)
+
+
+# ---- wrong-format files named .xlsx get a specific, actionable error ---------------
+
+
+def _zip_with(names):
+    def build(path):
+        import zipfile
+
+        with zipfile.ZipFile(path, "w") as z:
+            for n in names:
+                z.writestr(n, b"x")
+        return path
+
+    return build
+
+
+def _raw(data: bytes):
+    def build(path):
+        path.write_bytes(data)
+        return path
+
+    return build
+
+
+@pytest.mark.parametrize(
+    "build, expect",
+    [
+        (_zip_with(["Index/Document.iwa", "Metadata/Properties.plist"]), "Apple Numbers"),
+        (_zip_with(["something/else.txt"]), "not an Excel workbook"),
+        (_raw(b"\xd0\xcf\x11\xe0" + b"0" * 50), "old Excel"),
+        (_raw(b"Invoice No,Customer\n1,A\n"), "not a real .xlsx"),
+        (_raw(b"PK\x03\x04truncated"), "damaged"),
+    ],
+)
+def test_misnamed_xlsx_files_give_clear_errors(tmp_path, build, expect):
+    path = build(tmp_path / "export.xlsx")
+    with pytest.raises(UnsupportedFile, match=expect):
+        import_invoices(path)
