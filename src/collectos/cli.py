@@ -3,7 +3,7 @@
 import argparse
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -11,7 +11,7 @@ from pathlib import Path
 from . import synthetic
 from .ageing import Status, assess
 from .dates import DateError, parse_date
-from .importer import ImportFileError, import_invoices
+from .importer import ImportFileError, import_invoices, import_rows
 from .models import Invoice, customer_key
 from .money import MoneyError, format_inr, to_money
 from .readers import UnsupportedFile
@@ -76,6 +76,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("out", help="output .xlsx path")
     p.add_argument("--company", required=True)
     p.set_defaults(func=_cmd_report)
+
+    p = sub.add_parser("snapshot", parents=[common], help="record today's measures (take one on day 1 as the baseline, then weekly)")
+    p.set_defaults(func=_cmd_snapshot)
+
+    p = sub.add_parser("trend", parents=[common], help="show the recorded snapshots side by side")
+    p.set_defaults(func=_cmd_trend)
 
     p = sub.add_parser("demo", help="build a complete demo kit from synthetic data in a new folder")
     p.add_argument("outdir")
@@ -157,11 +163,32 @@ def _cmd_report(args) -> int:
     as_of = _as_of(args)
     with _open(args.db) as store:
         invoices = store.invoices()
-        promises, followups = store.open_promises(), store.followups()
+        promises, followups, snapshots = store.open_promises(), store.followups(), store.snapshots()
         queue = build_queue(invoices, as_of, store.last_contacts(), promises)
     path = write_owner_report(args.out, company=args.company, as_of=as_of, invoices=invoices, queue=queue,
-                              open_promises=promises, followups=followups)
+                              open_promises=promises, followups=followups, snapshots=snapshots)
     print(f"Wrote {path}")
+    return 0
+
+
+def _cmd_snapshot(args) -> int:
+    with _open(args.db) as store:
+        had = bool(store.snapshots())
+        snap = store.take_snapshot(_as_of(args), actor=args.actor)
+    kind = "Snapshot" if had else "Baseline snapshot"
+    print(f"{kind} for {snap.as_of:%d-%b-%Y} saved: outstanding {format_inr(snap.total_outstanding)}, "
+          f"overdue {format_inr(snap.overdue)} across {snap.overdue_customers} customer(s), "
+          f"payments seen in data since last snapshot {format_inr(snap.payments_observed)}.")
+    return 0
+
+
+def _cmd_trend(args) -> int:
+    with _open(args.db) as store:
+        snapshots = store.snapshots()
+    if not snapshots:
+        print("No snapshots yet. Run `collectos snapshot` after your first import to record the baseline.")
+        return 0
+    _print_trend(snapshots)
     return 0
 
 
@@ -176,6 +203,7 @@ def _cmd_demo(args) -> int:
 
 
 def run_demo(out: Path, as_of: date) -> None:
+    """Simulate five weeks as they would really have happened, oldest event first."""
     csv_path = synthetic.write_csv(out / "synthetic_invoices.csv", synthetic.generate_rows(as_of))
     db = out / "demo.db"
 
@@ -183,45 +211,72 @@ def run_demo(out: Path, as_of: date) -> None:
         moment = datetime.combine(as_of - timedelta(days=days_ago), time(11, 0), tzinfo=timezone.utc)
         return lambda: moment
 
-    report = import_invoices(csv_path)
-    with Store(db, now=clock(25)) as store:
-        result = store.apply_import(report, actor="demo", allow_errors=True)
-        invoices = store.invoices()
-    print(f"Imported {result.inserted} invoices from synthetic data "
-          f"({len(report.errors)} rows rejected, {len(report.duplicates)} duplicate rows flagged, "
-          f"{len(report.warnings)} warning(s)):")
-    for e in report.errors:
-        print(f"  row {e.row_no}: {e.message}")
+    final = import_invoices(csv_path)
+    history = synthetic.generate_history(as_of)
+    early = as_of - timedelta(days=max(history))
+    # Follow-ups go to the biggest overdue customers that already exist in the earliest import.
+    eligible = {customer_key(i.invoice.customer) for i in final.invoices if i.invoice.invoice_date <= early}
+    ranked = [c for c in _ranked_by_overdue([i.invoice for i in final.invoices], as_of) if customer_key(c) in eligible]
 
-    # A scripted history so the queue shows every behaviour. Each event is
-    # (customer rank by overdue, days ago, channel, outcome, promised date as days from as-of, note).
-    ranked = _ranked_by_overdue(invoices, as_of)
-    script = [
-        (0, 20, "call", "Said payment next week", -10, "broken promise example"),
-        (1, 1, "call", "Asked to call back", None, ""),
-        (2, 2, "call", "Will pay by Friday", 4, "pending promise example"),
-        (3, 18, "whatsapp", "Read, no reply", None, ""),
-        (4, 9, "call", "Promised part payment", -3, "kept promise example"),
-    ]
-    kept_promise_id = None
-    for rank, ago, channel, outcome, promise_delta, note in script:
-        if rank >= len(ranked):
-            continue
-        promise_date = None if promise_delta is None else as_of + timedelta(days=promise_delta)
+    # (days ago, channel, outcome, promised date as days from as-of or None, note); index = customer rank.
+    script = {
+        0: (20, "call", "Said payment next week", -10, "broken promise example"),
+        1: (1, "call", "Asked to call back", None, ""),
+        2: (2, "call", "Will pay by Friday", 4, "pending promise example"),
+        3: (18, "whatsapp", "Read, no reply", None, ""),
+        4: (9, "call", "Promised part payment", -3, "kept promise example"),
+    }
+    # Each event is (days ago, order within the day, action taking a Store).
+    events: list[tuple[int, int, Callable[[Store], object]]] = []
+
+    def weekly_import(ago: int, rows: list[list[str]]) -> Callable[[Store], object]:
+        def act(store: Store) -> None:
+            store.apply_import(import_rows(list(enumerate(rows, start=1))), actor="demo")
+            store.take_snapshot(as_of - timedelta(days=ago), actor="demo")
+        return act
+
+    def final_import(store: Store) -> None:
+        store.apply_import(final, actor="demo", allow_errors=True)
+        store.take_snapshot(as_of, actor="demo")
+
+    promise_ids: dict[int, int | None] = {}
+
+    def contact(rank: int, channel: str, outcome: str, promise_date: date | None, note: str) -> Callable[[Store], object]:
+        def act(store: Store) -> None:
+            promise_ids[rank] = store.log_followup(ranked[rank], channel, outcome, actor="demo", note=note,
+                                                   promise_date=promise_date)[1]
+        return act
+
+    def mark_kept(rank: int) -> Callable[[Store], object]:
+        def act(store: Store) -> None:
+            if promise_ids.get(rank):
+                store.resolve_promise(promise_ids[rank], "kept", actor="demo", note="Part payment received")
+        return act
+
+    for ago, rows in history.items():
+        events.append((ago, 0, weekly_import(ago, rows)))
+    events.append((0, 0, final_import))
+    for rank, (ago, channel, outcome, delta, note) in script.items():
+        if rank < len(ranked):
+            events.append((ago, 1, contact(rank, channel, outcome, None if delta is None else as_of + timedelta(days=delta), note)))
+    if len(ranked) > 4:
+        events.append((1, 2, mark_kept(4)))
+
+    for ago, _, action in sorted(events, key=lambda e: (-e[0], e[1])):
         with Store(db, now=clock(ago)) as store:
-            _, pid = store.log_followup(ranked[rank], channel, outcome, actor="demo", note=note, promise_date=promise_date)
-        if rank == 4:
-            kept_promise_id = pid
-    if kept_promise_id:
-        with Store(db, now=clock(1)) as store:
-            store.resolve_promise(kept_promise_id, "kept", actor="demo", note="Part payment received")
+            action(store)
+
+    print(f"Final export: {len(final.invoices)} invoices valid, {len(final.errors)} rows rejected, "
+          f"{len(final.duplicates)} duplicate rows flagged, {len(final.warnings)} warning(s):")
+    for e in final.errors:
+        print(f"  row {e.row_no}: {e.message}")
 
     with Store(db, now=clock(0)) as store:
         queue = _queue(store, as_of)
-        invoices, promises, followups = store.invoices(), store.open_promises(), store.followups()
+        invoices, promises, followups, snapshots = store.invoices(), store.open_promises(), store.followups(), store.snapshots()
     xlsx = write_owner_report(out / "owner_report.xlsx", company="Demo Distributors (synthetic data)", as_of=as_of,
                               invoices=invoices, queue=queue, open_promises=promises, followups=followups,
-                              warnings=report.warnings)
+                              snapshots=snapshots, warnings=final.warnings)
     drafts = out / "reminder_drafts.txt"
     blocks = []
     for item in queue.work[:3]:
@@ -232,7 +287,9 @@ def run_demo(out: Path, as_of: date) -> None:
 
     print()
     _print_queue(queue)
-    print(f"\nDemo kit written to {out}/\n  {csv_path.name}  (synthetic input)\n  {xlsx.name}  (owner report)\n  {drafts.name}  (reminder drafts, never sent)\n  {db.name}  (demo database)")
+    print("\nSynthetic five-week history:")
+    _print_trend(snapshots)
+    print(f"\nDemo kit written to {out}/\n  {csv_path.name}  (synthetic input)\n  {xlsx.name}  (owner report, incl. Trend sheet)\n  {drafts.name}  (reminder drafts, never sent)\n  {db.name}  (demo database)")
 
 
 # ---- helpers --------------------------------------------------------------------
@@ -260,6 +317,14 @@ def _ranked_by_overdue(invoices: list[Invoice], as_of: date) -> list[str]:
         if a.status is Status.OVERDUE:
             totals[i.customer] = totals.get(i.customer, Decimal("0")) + a.outstanding
     return [c for c, _ in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0].casefold()))]
+
+
+def _print_trend(snapshots) -> None:
+    print(f"{'As of':<12}{'Outstanding':>16}{'Overdue':>16}{'>60d':>14}{'>90d':>14}{'Follow-ups':>11}{'Broken':>7}{'Paid seen':>14}")
+    for x in snapshots:
+        print(f"{x.as_of:%d-%b-%Y}  {format_inr(x.total_outstanding):>16}{format_inr(x.overdue):>16}"
+              f"{format_inr(x.over60):>14}{format_inr(x.over90):>14}{x.followups_7d:>11}{x.broken_promises:>7}"
+              f"{format_inr(x.payments_observed):>14}")
 
 
 def _print_queue(queue: Queue) -> None:

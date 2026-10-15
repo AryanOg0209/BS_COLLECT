@@ -147,3 +147,58 @@ def test_demo_is_reproducible(capsys, tmp_path):
         run(capsys, "demo", str(tmp_path / name), "--as-of", "15-10-2026")
     assert (tmp_path / "a" / "synthetic_invoices.csv").read_text() == (tmp_path / "b" / "synthetic_invoices.csv").read_text()
     assert (tmp_path / "a" / "reminder_drafts.txt").read_text() == (tmp_path / "b" / "reminder_drafts.txt").read_text()
+
+
+# ---- snapshots, trend, history ------------------------------------------------------
+
+
+def test_snapshot_and_trend_commands(capsys, db, csv_file):
+    run(capsys, "import", csv_file, "--db", db)
+    code, out, _ = run(capsys, "trend", "--db", db)
+    assert code == 0 and "No snapshots yet" in out
+    code, out, _ = run(capsys, "snapshot", "--db", db)
+    assert code == 0 and out.startswith("Baseline snapshot") and "₹1,05,000.00" in out
+    code, out, _ = run(capsys, "snapshot", "--db", db)
+    assert out.startswith("Snapshot for")
+    code, out, _ = run(capsys, "trend", "--db", db)
+    assert "Paid seen" in out and out.count("\n") >= 2
+
+
+def test_report_command_includes_trend_when_snapshots_exist(capsys, db, csv_file, tmp_path):
+    run(capsys, "import", csv_file, "--db", db)
+    run(capsys, "snapshot", "--db", db)
+    out_file = tmp_path / "r.xlsx"
+    run(capsys, "report", str(out_file), "--db", db, "--company", "X")
+    assert "Trend" in load_workbook(out_file).sheetnames
+
+
+def test_synthetic_history_is_consistent_with_the_final_export():
+    as_of = date(2026, 10, 15)
+    final = {i.invoice_no: i for i in synthetic.generate_invoices(as_of)}
+    history = synthetic.generate_history(as_of)
+    assert sorted(history) == [7, 14, 21, 28]
+    previous_paid = {}
+    for ago in (28, 21, 14, 7):
+        day = as_of - timedelta(days=ago)
+        report = import_rows([(i, r) for i, r in enumerate(history[ago], start=1)])
+        assert report.ok
+        for item in report.invoices:
+            inv, truth = item.invoice, final[item.invoice.invoice_no]
+            assert inv.invoice_date <= day                       # no invoice exists before it is issued
+            assert inv.paid in (Decimal("0.00"), truth.final_paid)
+            assert inv.paid >= previous_paid.get(inv.invoice_no, Decimal("0.00"))  # payments only accumulate
+            previous_paid[inv.invoice_no] = inv.paid
+    final_paid_seen = {n: p for n, p in previous_paid.items()}
+    assert all(p <= final[n].final_paid for n, p in final_paid_seen.items())
+
+
+def test_demo_records_five_weekly_snapshots_with_payments_seen(capsys, tmp_path):
+    code, out, _ = run(capsys, "demo", str(tmp_path / "kit"), "--as-of", "15-10-2026")
+    assert code == 0 and "Synthetic five-week history" in out
+    with Store(tmp_path / "kit" / "demo.db") as s:
+        snaps = s.snapshots()
+    assert [x.as_of for x in snaps] == [date(2026, 9, 17) + timedelta(days=7 * k) for k in range(5)]
+    assert snaps[0].payments_observed == Decimal("0.00")             # baseline
+    assert all(x.payments_observed > 0 for x in snaps[1:])
+    wb = load_workbook(tmp_path / "kit" / "owner_report.xlsx")
+    assert "Trend" in wb.sheetnames and wb["Trend"].max_row >= 10

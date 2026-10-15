@@ -119,4 +119,4 @@ def test_migrates_a_v1_database_to_v2_without_losing_data(tmp_path):
     with Store(db, now=lambda: NOW) as s:
         assert s.invoices()[0].amount == Decimal("1000.00")
         s.log_followup("Acme", "email", "sent reminder", actor="a")  # v2 table is usable
-        assert s._db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 2
+        assert s._db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 3

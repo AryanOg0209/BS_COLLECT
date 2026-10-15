@@ -128,3 +128,43 @@ def test_empty_input_still_produces_a_valid_report(tmp_path):
     wb = make(tmp_path, [])
     summary = {wb["Summary"].cell(row=r, column=1).value: wb["Summary"].cell(row=r, column=2).value for r in range(1, 20)}
     assert dec(summary["Total outstanding"]) == Decimal("0.00") and summary["Overdue share of outstanding"] is None
+
+
+# ---- Trend sheet --------------------------------------------------------------------
+
+
+def _snap(i, as_of, overdue, over60=0, paid=0, broken=0):
+    from collectos.store import Snapshot
+
+    d = Decimal
+    return Snapshot(i, as_of, "t", "a", d("1000000.00"), d(str(overdue)), d(str(overdue)), d(str(over60)), d("0.00"),
+                    10, 5, 3, 2, 1, broken, d(str(paid)))
+
+
+def test_no_trend_sheet_without_snapshots(tmp_path):
+    assert "Trend" not in make(tmp_path, SCENARIO).sheetnames
+
+
+def test_trend_sheet_shows_each_snapshot_and_baseline_comparison(tmp_path):
+    snaps = [_snap(1, date(2026, 9, 17), 500000, 200000), _snap(2, date(2026, 10, 15), 420000.50, 150000, paid=80000, broken=1)]
+    queue = build_queue(SCENARIO, TODAY, {}, [])
+    path = write_owner_report(tmp_path / "t.xlsx", company="Co", as_of=TODAY, invoices=SCENARIO, queue=queue, snapshots=snaps)
+    wb = load_workbook(path)
+    assert wb.sheetnames[:2] == ["Summary", "Trend"]
+    ws = wb["Trend"]
+    assert ws.cell(row=4, column=1).value.date() == date(2026, 9, 17) and dec(ws.cell(row=4, column=3).value) == Decimal("500000")
+    assert dec(ws.cell(row=5, column=12).value) == Decimal("80000")
+    rows = {ws.cell(row=r, column=1).value: [ws.cell(row=r, column=c).value for c in (2, 3, 4)] for r in range(1, ws.max_row + 1)}
+    base, latest, change = rows["Overdue"]
+    assert (dec(base), dec(latest), dec(change)) == (Decimal("500000"), Decimal("420000.50"), Decimal("-79999.50"))
+    assert rows["Broken promises"][2] == 1
+    text = " ".join(str(c.value) for row in ws.iter_rows() for c in row if c.value)
+    assert "do not prove that any change was caused" in text and "not counted as payments" in text
+
+
+def test_single_snapshot_shows_baseline_only(tmp_path):
+    queue = build_queue(SCENARIO, TODAY, {}, [])
+    path = write_owner_report(tmp_path / "t.xlsx", company="Co", as_of=TODAY, invoices=SCENARIO, queue=queue,
+                              snapshots=[_snap(1, TODAY, 100)])
+    text = " ".join(str(c.value) for row in load_workbook(path)["Trend"].iter_rows() for c in row if c.value)
+    assert "Baseline (" not in text and "Week-by-week" in text

@@ -21,7 +21,7 @@ from .models import Invoice, Promise
 from .workqueue import Queue
 
 if TYPE_CHECKING:
-    from .store import FollowUp
+    from .store import FollowUp, Snapshot
 
 INR_FORMAT = r"[>=10000000]##\,##\,##\,##0.00;[>=100000]##\,##\,##0.00;##,##0.00"
 DATE_FORMAT = "DD-MMM-YYYY"
@@ -44,12 +44,15 @@ def write_owner_report(
     queue: Queue,
     open_promises: Sequence[Promise] = (),
     followups: Sequence["FollowUp"] = (),
+    snapshots: Sequence["Snapshot"] = (),
     warnings: Sequence[str] = (),
     edges: tuple[int, ...] = DEFAULT_EDGES,
 ) -> Path:
     results = [assess(i, as_of, edges) for i in invoices]
     wb = Workbook()
     _summary(wb.active, company, as_of, results, queue, open_promises, followups, edges)
+    if snapshots:
+        _trend_sheet(wb.create_sheet("Trend", 1), snapshots)
     _queue_sheet(wb.create_sheet("Today's Queue"), queue)
     _waiting_sheet(wb.create_sheet("Waiting"), queue)
     _customers_sheet(wb.create_sheet("Ageing by Customer"), results, edges)
@@ -107,6 +110,47 @@ def _summary(ws, company, as_of, results, queue, promises, followups, edges) -> 
     top = [s for s in top if s.overdue > 0][:10]
     _table(ws, top_row + 1, ["Customer", "Overdue", "Oldest (days)"], [[s.customer, s.overdue, s.max_days_overdue] for s in top], {2})
     _widths(ws, [52, 18, 16])
+
+
+def _trend_sheet(ws, snapshots: Sequence["Snapshot"]) -> None:
+    _put(ws, 1, 1, "Week-by-week measures", Font(bold=True, size=14))
+    headers = ["As of", "Outstanding", "Overdue", "Over 30 days", "Over 60 days", "Over 90 days", "Overdue invoices",
+               "Customers overdue", "Follow-ups (7 days)", "Open promises", "Broken promises", "Payments seen in data"]
+    rows = [
+        [x.as_of, x.total_outstanding, x.overdue, x.over30, x.over60, x.over90, x.overdue_invoices,
+         x.overdue_customers, x.followups_7d, x.open_promises, x.broken_promises, x.payments_observed]
+        for x in snapshots
+    ]
+    _table(ws, 3, headers, rows, {2, 3, 4, 5, 6, 12})
+
+    top = 3 + len(rows) + 2
+    if len(snapshots) >= 2:
+        first, last = snapshots[0], snapshots[-1]
+        _put(ws, top, 1, f"Baseline ({first.as_of:%d-%b-%Y}) vs latest ({last.as_of:%d-%b-%Y})", Font(bold=True))
+        measures = [
+            ("Overdue", first.overdue, last.overdue, True),
+            ("Overdue more than 60 days", first.over60, last.over60, True),
+            ("Overdue more than 90 days", first.over90, last.over90, True),
+            ("Overdue invoices", first.overdue_invoices, last.overdue_invoices, False),
+            ("Customers overdue", first.overdue_customers, last.overdue_customers, False),
+            ("Broken promises", first.broken_promises, last.broken_promises, False),
+        ]
+        _table(ws, top + 1, ["Measure", "Baseline", "Latest", "Change"],
+               [[label, a, b, b - a] for label, a, b, _ in measures], set())
+        for r, (_, _, _, money) in enumerate(measures, start=top + 2):
+            for c in (2, 3, 4):
+                if money:
+                    ws.cell(row=r, column=c).number_format = INR_FORMAT
+        top += len(measures) + 3
+    _put(ws, top, 1, "How to read this", Font(bold=True))
+    for i, line in enumerate((
+        "These numbers describe what the supplied data showed on each date. They do not prove that any change was caused by follow-up work:",
+        "new invoices, seasonality, customer cash positions and one-off events all move them.",
+        "'Payments seen in data' counts only increases in paid amounts that arrived through imports since the previous snapshot.",
+        "Invoices that disappear from an export are not counted as payments, because the amount is unknown.",
+    ), start=top + 1):
+        _put(ws, i, 1, line)
+    _widths(ws, [30, 16, 16, 16, 16, 16, 16, 18, 18, 14, 16, 22])
 
 
 def _queue_sheet(ws, queue: Queue) -> None:

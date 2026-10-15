@@ -11,15 +11,16 @@ import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from .ageing import Status, assess
 from .importer import ImportReport
 from .models import Invoice, Promise, customer_key
 from .money import to_money
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_V1 = """
 CREATE TABLE imports (
@@ -102,7 +103,34 @@ CREATE TRIGGER promises_no_delete BEFORE DELETE ON promises
 BEGIN SELECT RAISE(ABORT, 'promises cannot be deleted; cancel them instead'); END;
 """
 
-_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2}
+_SCHEMA_V3 = """
+CREATE TABLE snapshots (
+    id INTEGER PRIMARY KEY,
+    as_of TEXT NOT NULL,
+    taken_ts TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    audit_high_water INTEGER NOT NULL,
+    total_outstanding_paise INTEGER NOT NULL,
+    overdue_paise INTEGER NOT NULL,
+    over30_paise INTEGER NOT NULL,
+    over60_paise INTEGER NOT NULL,
+    over90_paise INTEGER NOT NULL,
+    open_invoices INTEGER NOT NULL,
+    overdue_invoices INTEGER NOT NULL,
+    overdue_customers INTEGER NOT NULL,
+    followups_7d INTEGER NOT NULL,
+    open_promises INTEGER NOT NULL,
+    broken_promises INTEGER NOT NULL,
+    payments_observed_paise INTEGER NOT NULL
+);
+CREATE INDEX idx_snapshots_as_of ON snapshots(as_of, id);
+CREATE TRIGGER snapshots_no_update BEFORE UPDATE ON snapshots
+BEGIN SELECT RAISE(ABORT, 'snapshots is append-only'); END;
+CREATE TRIGGER snapshots_no_delete BEFORE DELETE ON snapshots
+BEGIN SELECT RAISE(ABORT, 'snapshots is append-only'); END;
+"""
+
+_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3}
 
 
 class StoreError(RuntimeError):
@@ -131,6 +159,28 @@ class FollowUp:
     channel: str
     outcome: str
     note: str
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """A point-in-time set of receivables measures. Descriptive only: it records what the data showed."""
+
+    id: int
+    as_of: date
+    taken_ts: str
+    actor: str
+    total_outstanding: Decimal
+    overdue: Decimal
+    over30: Decimal
+    over60: Decimal
+    over90: Decimal
+    open_invoices: int
+    overdue_invoices: int
+    overdue_customers: int
+    followups_7d: int
+    open_promises: int
+    broken_promises: int
+    payments_observed: Decimal  # increases in recorded paid amounts since the previous snapshot
 
 
 @dataclass(frozen=True)
@@ -412,6 +462,76 @@ class Store:
             sql, args = sql + " WHERE customer_key = ?", (customer_key(customer),)
         rows = self._db.execute(sql + " ORDER BY id", args).fetchall()
         return [FollowUp(r["id"], r["customer"], r["ts"], r["actor"], r["channel"], r["outcome"], r["note"]) for r in rows]
+
+    # ---- snapshots --------------------------------------------------------------
+
+    def take_snapshot(self, as_of: date, actor: str) -> Snapshot:
+        """Record today's measures. Snapshots are immutable; take another to supersede one.
+
+        payments_observed is the sum of *increases* in recorded paid amounts that arrived through
+        imports since the previous snapshot (read from the audit trail). It is not an estimate:
+        invoices that merely vanish from an export are not counted, and the first snapshot is a
+        baseline with 0.
+        """
+        results = [assess(i, as_of) for i in self.invoices()]
+        zero = Decimal("0.00")
+        open_ = [r for r in results if r.status not in (Status.PAID, Status.OVERPAID)]
+        overdue = [r for r in open_ if r.status is Status.OVERDUE]
+
+        def total(rows):
+            return sum((r.outstanding for r in rows), zero)
+
+        window_start = as_of - timedelta(days=6)
+        followups_7d = sum(1 for f in self.followups() if window_start <= datetime.fromisoformat(f.ts).date() <= as_of)
+        promises = self.open_promises()
+
+        high_water = self._db.execute("SELECT COALESCE(MAX(id), 0) FROM audit_log").fetchone()[0]
+        prev = self._db.execute("SELECT audit_high_water FROM snapshots ORDER BY id DESC LIMIT 1").fetchone()
+        observed = self._payments_between(prev["audit_high_water"], high_water) if prev else zero
+
+        ts = self._now().isoformat(timespec="seconds")
+        with self._db:
+            snapshot_id = self._db.execute(
+                "INSERT INTO snapshots (as_of, taken_ts, actor, audit_high_water, total_outstanding_paise, "
+                "overdue_paise, over30_paise, over60_paise, over90_paise, open_invoices, overdue_invoices, "
+                "overdue_customers, followups_7d, open_promises, broken_promises, payments_observed_paise) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (as_of.isoformat(), ts, actor, high_water, to_paise(total(open_)), to_paise(total(overdue)),
+                 to_paise(total([r for r in overdue if r.days_overdue > 30])),
+                 to_paise(total([r for r in overdue if r.days_overdue > 60])),
+                 to_paise(total([r for r in overdue if r.days_overdue > 90])),
+                 len(open_), len(overdue), len({customer_key(r.invoice.customer) for r in overdue}),
+                 followups_7d, len(promises), sum(1 for p in promises if p.promised_date < as_of),
+                 to_paise(observed)),
+            ).lastrowid
+        return next(s for s in self.snapshots() if s.id == snapshot_id)
+
+    def _payments_between(self, after_id: int, up_to_id: int) -> Decimal:
+        rows = self._db.execute(
+            "SELECT before_json, after_json FROM audit_log WHERE action = 'invoice.updated' AND id > ? AND id <= ?",
+            (after_id, up_to_id),
+        ).fetchall()
+        paise = 0
+        for r in rows:
+            delta = json.loads(r["after_json"])["paid_paise"] - json.loads(r["before_json"])["paid_paise"]
+            if delta > 0:
+                paise += delta
+        return from_paise(paise)
+
+    def snapshots(self) -> list[Snapshot]:
+        """All snapshots, oldest first. If several share an as_of date, the latest taken is kept."""
+        rows = self._db.execute("SELECT * FROM snapshots ORDER BY as_of, id").fetchall()
+        latest: dict[str, sqlite3.Row] = {r["as_of"]: r for r in rows}
+        return [
+            Snapshot(
+                r["id"], date.fromisoformat(r["as_of"]), r["taken_ts"], r["actor"],
+                from_paise(r["total_outstanding_paise"]), from_paise(r["overdue_paise"]),
+                from_paise(r["over30_paise"]), from_paise(r["over60_paise"]), from_paise(r["over90_paise"]),
+                r["open_invoices"], r["overdue_invoices"], r["overdue_customers"], r["followups_7d"],
+                r["open_promises"], r["broken_promises"], from_paise(r["payments_observed_paise"]),
+            )
+            for r in latest.values()
+        ]
 
     # ---- operations -------------------------------------------------------------
 
