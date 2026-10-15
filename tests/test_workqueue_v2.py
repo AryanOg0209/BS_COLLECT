@@ -141,3 +141,20 @@ def test_exposure_includes_not_yet_due_invoices():
 def test_rules_can_be_tuned():
     item = only(queue([inv("A", "Acme", 40)], rules=QueueRules(owner_call_days=30)))
     assert item.stage == 3
+
+
+def test_an_open_past_due_promise_is_counted_once_not_twice():
+    """reliability() includes open past-due promises as broken; the queue must not score the same promise again."""
+    past = date(2026, 10, 10)
+    item = only(queue([inv("A", "Acme", 5)], [promise("Acme", past)], reliability={"acme": Reliability(kept=0, broken=1)}))
+    assert item.stage == 2 and "a promise was broken" in item.stage_why           # not "2 broken promises" / stage 3
+    assert item.promises_broken == 0 and not any("past promises" in r for r in item.reasons)
+    assert sum(1 for r in item.reasons if "broken promise" in r) == 1
+
+
+def test_resolved_history_still_counts_alongside_a_current_broken_promise():
+    past = date(2026, 10, 10)
+    # history: 1 kept, 3 broken in total, of which 1 is the open past-due one -> 2 resolved broken + 1 now
+    item = only(queue([inv("A", "Acme", 5)], [promise("Acme", past)], reliability={"acme": Reliability(kept=1, broken=3)}))
+    assert item.promises_broken == 2 and item.stage == 4 and "3 broken promises" in item.stage_why
+    assert any("kept 1 of 3 past promises" in r for r in item.reasons)

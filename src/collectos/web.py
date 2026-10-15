@@ -41,7 +41,7 @@ from .workqueue import build_queue
 
 WEB_DIR = Path(__file__).parent / "webui"
 STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.css": "text/css; charset=utf-8",
-                "app.js": "text/javascript; charset=utf-8", "logo.svg": "image/svg+xml"}
+                "app.js": "text/javascript; charset=utf-8", "features.js": "text/javascript; charset=utf-8", "logo.svg": "image/svg+xml"}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 _ZERO = Decimal("0.00")

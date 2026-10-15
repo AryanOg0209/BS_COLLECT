@@ -186,3 +186,30 @@ def test_msme_window_marks_only_open_invoices_older_than_45_days():
              inv("B", "X", "100", inv_date=date(2026, 8, 31)),            # 45 days: not past
              inv("C", "X", "100", paid="100", inv_date=date(2026, 1, 1))]  # settled
     assert [i.invoice_no for i in past_msme_window(items, AS_OF)] == ["A"]
+
+
+# ---- a distinctive word of the name ----------------------------------------------------------------------------
+
+DEMO_INVOICES = [inv("INV-1", "Malwa Chemicals (Demo)", "100000"), inv("INV-2", "Western Pumps (Demo)", "50000"), inv("INV-3", "Western Valves (Demo)", "9000")]
+
+
+def test_a_word_unique_to_one_customer_is_a_weak_clue_and_tds_is_still_noticed():
+    s = one("RTGS MALWA PAYMENT", "98000", invoices=DEMO_INVOICES)             # 2% below INV-1
+    assert s.customer == "Malwa Chemicals (Demo)" and s.confidence == "low"
+    assert any("'MALWA'" in r and "only in this customer's name" in r for r in s.reasons)
+    assert any("about 2% below" in r and "TDS" in r for r in s.reasons)
+
+
+def test_a_shared_word_is_not_distinctive():
+    s = one("RTGS WESTERN PAYMENT", "123", invoices=DEMO_INVOICES)          # WESTERN is in two customers' names
+    assert s.customer is None and s.confidence in ("low", "none")
+
+
+def test_short_words_are_never_used_as_distinctive_clues():
+    s = one("PAID BY ABC", "7", invoices=[inv("INV-1", "ABC Ltd", "500")])
+    assert not any("only in this customer's name" in r for r in s.reasons)
+
+
+def test_words_from_two_customers_in_one_narration_stay_ambiguous():
+    s = one("MALWA AND PUMPS", "5", invoices=DEMO_INVOICES)
+    assert s.customer is None and any("more than one customer" in r for r in s.reasons)

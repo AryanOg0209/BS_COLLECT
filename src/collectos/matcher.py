@@ -153,16 +153,15 @@ def _name_tokens(name: str) -> set[str]:
     return {t for t in _tokens(name) if len(t) >= 3 and t not in STOPWORDS and not t.isdigit()}
 
 
+def _token_hit(word: str, narration_tokens: list[str]) -> bool:
+    """A name word appears in the narration, allowing for the truncation banks apply (min 5 letters)."""
+    return any(t == word or (len(t) >= 5 and word.startswith(t)) or (len(word) >= 5 and t.startswith(word)) for t in narration_tokens)
+
+
 def _name_score(sig: set[str], narration_tokens: list[str]) -> Decimal:
     if not sig:
         return Decimal(0)
-    hit = 0
-    for s in sig:
-        for t in narration_tokens:
-            if t == s or (len(t) >= 5 and s.startswith(t)) or (len(s) >= 5 and t.startswith(s)):
-                hit += 1
-                break
-    return Decimal(hit) / Decimal(len(sig))
+    return Decimal(sum(1 for word in sig if _token_hit(word, narration_tokens))) / Decimal(len(sig))
 
 
 def _best_subset(amount: Decimal, invoices: list[Invoice]) -> tuple[str, list[Invoice], Decimal] | None:
@@ -189,6 +188,10 @@ def suggest(credits: Iterable[Credit], invoices: Iterable[Invoice], as_of: date,
         by_cust.setdefault(customer_key(i.customer), []).append(i)
     names = {k: v[0].customer for k, v in by_cust.items()}
     sigs = {k: _name_tokens(n) for k, n in names.items()}
+    freq: dict[str, int] = {}
+    for sig in sigs.values():
+        for word in sig:
+            freq[word] = freq.get(word, 0) + 1
     promises: dict[str, list[int]] = {}
     for p in open_promises:
         promises.setdefault(p.customer_key, []).append(p.id)
@@ -237,6 +240,17 @@ def suggest(credits: Iterable[Credit], invoices: Iterable[Invoice], as_of: date,
             else:
                 confidence = "low"
                 reasons.append("part of more than one customer's name appears in the narration")
+        else:
+            # a word of 4+ letters that belongs to exactly one customer's name is a weak clue on its own
+            distinct = {k: [w for w in sorted(sig) if freq[w] == 1 and len(w) >= 4 and _token_hit(w, toks)] for k, sig in sigs.items()}
+            distinct = {k: v for k, v in distinct.items() if v}
+            if len(distinct) == 1:
+                cust_key = next(iter(distinct))
+                pool, confidence = by_cust[cust_key], "low"
+                reasons.append(f"the word {distinct[cust_key][0]!r} in the narration appears only in this customer's name")
+            elif len(distinct) > 1:
+                confidence = "low"
+                reasons.append("distinctive words from more than one customer's name appear in the narration")
 
         chosen: list[Invoice] = []
         matched_total: Decimal | None = None

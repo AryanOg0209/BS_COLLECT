@@ -57,6 +57,16 @@
     alert: ["M12 4l9 16H3z", "M12 10v4", "M12 17.5v.5"],
     phone: ["M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v3a2 2 0 0 1-2 2A15 15 0 0 1 3 6a2 2 0 0 1 2-2z"],
     plus: ["M12 5v14", "M5 12h14"],
+    disputes: ["M4 20l16-16", "M4 4h8v8H4z", "M12 12h8v8h-8z"],
+    credit: ["M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", "M9 12l2 2 4-4"],
+    import: ["M12 15V4", "M7 9l5-5 5 5", "M5 20h14"],
+    payments: ["M3 8h18v10H3z", "M3 12h18", "M7 16h3"],
+    activity: ["M12 7v5l3 2", "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z"],
+    print: ["M7 9V4h10v5", "M7 17H5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2", "M7 14h10v6H7z"],
+    chat: ["M4 5h16v11H9l-5 4z"],
+    edit: ["M4 20h4L19 9l-4-4L4 16z", "M13 7l4 4"],
+    check: ["M5 12l5 5 9-10"],
+    link: ["M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1", "M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"],
     money: ["M3 7h18v10H3z", "M12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z", "M6 10v4", "M18 10v4"],
   };
   function icon(name, cls = "ico") {
@@ -100,10 +110,13 @@
     data: null, session: { token: "", writable: false }, view: "dashboard", asOf: new URLSearchParams(location.search).get("as_of") || "",
     chartMode: "age", calYM: null, calSel: null, filter: "", remindFor: null, trendMetric: "overdue",
   };
+  // Sidebar order. Screens registered by features.js slot in by id; ids not listed here are reachable by link only.
+  const NAV_ORDER = ["dashboard", "queue", "customers", "promises", "disputes", "credit", "reminders", "import", "payments", "trend", "activity", "settings"];
   const NAV = [
     ["dashboard", "Dashboard", "dashboard"], ["queue", "Work Queue", "queue"], ["customers", "Customers", "customers"],
     ["promises", "Promises", "promises"], ["reminders", "Reminders", "reminders"], ["trend", "Trend", "trend"], ["settings", "Settings", "settings"],
   ];
+  const PARENT = { customer: "customers", callsheet: "queue" };   // which sidebar item stays lit on a detail screen
   const BAR_TOP = ["#7ee6cb", "#a98ae8", "#c455e0", "#e03bd9", "#ff4fa3", "#8a8a99"];
   const BAR_BOT = ["#2f9c85", "#2f9c85", "#2f9c85", "#2f9c85", "#2f9c85", "#4a4a57"];
   const DONUT = ["#5ad1b0", "#8e63e0", "#b13bd6", "#e03bd9", "#ff4fa3", "#6f6f7d"];
@@ -280,7 +293,7 @@
       }
       const sel = state.calSel && byDate[state.calSel];
       const list = h("ul", { class: "cal-list" }, sel
-        ? sel.map((p) => h("li", {}, h("span", { text: p.customer }), h("span", { class: "chip " + (p.state === "broken" ? "broken" : "pending"), text: p.state === "broken" ? "Broken" : "Pending" })))
+        ? sel.map((p) => h("li", {}, custLink(p.customer), h("span", { class: "chip " + (p.state === "broken" ? "broken" : "pending"), text: p.state === "broken" ? "Broken" : "Pending" })))
         : (state.calSel ? [h("li", { class: "sub", text: "No promises on " + dmy(state.calSel) })] : []));
       const legend = h("div", { class: "legend-cal" }, h("span", {}, h("i", { style: { background: "var(--teal)" } }), "Pending"), h("span", {}, h("i", { style: { background: "var(--warn)" } }), "Broken (date passed)"));
       box.replaceChildren(...[head, grid, list, big ? null : legend].filter(Boolean));
@@ -288,6 +301,9 @@
     render();
     return box;
   }
+
+  const custHref = (name) => "#/customer/" + encodeURIComponent(name);
+  const custLink = (name) => h("a", { class: "plainlink", href: custHref(name), text: name, onclick: (e) => e.stopPropagation() });
 
   /* ---------- tables ---------- */
   function queueTable(rows, { limit, expandable = true, compact: slim = false } = {}) {
@@ -300,12 +316,14 @@
       const reasons = h("ul", { class: "reasons" }, r.reasons.map((x) => h("li", { text: x })));
       const cells = [
         slim ? null : h("td", { class: "num", text: String(i + 1) }),
-        h("td", {}, h("div", { text: r.customer }), expandable ? reasons : null,
+        h("td", {}, h("div", {}, custLink(r.customer)), expandable ? reasons : null,
           expandable ? h("div", { class: "rowactions" },
-            writable() ? h("button", { type: "button", class: "btn small", onclick: (e) => { e.stopPropagation(); openFollowup(r.customer); } }, icon("phone"), "Log follow-up") : null,
-            h("button", { type: "button", class: "btn small ghost", onclick: (e) => { e.stopPropagation(); state.remindFor = r.customer; go("reminders"); } }, icon("reminders"), "Draft reminder")) : null,
+            writable() ? h("button", { type: "button", class: "btn small ghost", onclick: (e) => { e.stopPropagation(); openFollowup(r.customer); } }, icon("phone"), "Log follow-up") : null,
+            h("button", { type: "button", class: "btn small", onclick: (e) => { e.stopPropagation(); CO.openSend && CO.openSend(r.customer); } }, icon("reminders"), "Send reminder"),
+            h("a", { class: "btn small ghost", href: custHref(r.customer), onclick: (e) => e.stopPropagation() }, icon("customers"), "Open customer")) : null,
           slim && r.broken_promise_dates.length ? h("span", { class: "chip broken", style: { "margin-top": "4px" }, text: "Broken promise" }) : null),
         h("td", {}, h("span", { class: "chip " + (r.action === "Call" ? "call" : "remind"), text: r.action })),
+        slim ? null : h("td", {}, h("span", { class: "chip stagechip s" + r.stage, title: r.stage_why, text: `${r.stage} · ${r.stage_label}` })),
         slim ? null : h("td", {}, h("span", { class: "scorebar" }, h("i", { style: { "--w": (r.score / maxScore) * 100 + "%" } })), h("span", { class: "num", text: String(r.score) })),
         h("td", { class: "r num", text: slim ? compact(Number(r.overdue)) : fmt(r.overdue), title: r.overdue }),
         h("td", { class: "r num", text: r.oldest_days + "d" }),
@@ -319,7 +337,7 @@
       }
       body.append(tr);
     });
-    const cols = slim ? ["Customer", "Action", "Overdue", "Oldest"] : ["#", "Customer", "Action", "Score", "Overdue", "Oldest", "Contact"];
+    const cols = slim ? ["Customer", "Action", "Overdue", "Oldest"] : ["#", "Customer", "Action", "Stage", "Score", "Overdue", "Oldest", "Contact"];
     const right = new Set(slim ? ["Overdue", "Oldest"] : ["Overdue", "Oldest", "Contact"]);
     const head = h("tr", {}, cols.map((t) => h("th", { scope: "col", class: right.has(t) ? "r" : "", text: t })));
     return h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, head), body));
@@ -336,7 +354,8 @@
   }
   const dlg = $("#modal");
   dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
-  function openModal({ title, intro, fields, submit, onSubmit, danger = false }) {
+  function openModal({ title, intro, fields, submit, onSubmit, danger = false, wide = false }) {
+    dlg.classList.toggle("wide", wide);
     const err = h("div", { class: "form-error", role: "alert", hidden: true });
     const go = h("button", { type: "submit", class: "btn" + (danger ? " bad" : ""), text: submit });
     const form = h("form", { novalidate: true }, h("h2", { id: "modalTitle", text: title }), intro ? h("p", { class: "sub", text: intro }) : null, fields, err,
@@ -352,13 +371,13 @@
   }
   const field = (label, control, hint) => h("div", { class: "field" }, h("label", { for: control.id, text: label }), control, hint ? h("span", { class: "hint", text: hint }) : null);
 
-  function openFollowup(customer = "") {
+  function openFollowup(customer = "", prefill = {}) {
     if (!writable()) return;
     const names = (state.data ? state.data.customers : []).map((c) => c.customer);
     const cust = h("input", { id: "f-cust", name: "customer", list: "f-cust-list", value: customer, placeholder: "Start typing a customer name", autocomplete: "off", required: true });
-    const channel = h("select", { id: "f-chan", name: "channel" }, ...["call", "whatsapp", "email", "visit", "other"].map((c) => h("option", { value: c, text: c[0].toUpperCase() + c.slice(1) })));
-    const outcome = h("input", { id: "f-out", name: "outcome", placeholder: "e.g. Said he will pay on Friday", required: true });
-    const note = h("textarea", { id: "f-note", name: "note", placeholder: "Optional details" });
+    const channel = h("select", { id: "f-chan", name: "channel" }, ...["call", "whatsapp", "email", "visit", "other"].map((c) => h("option", { value: c, text: c[0].toUpperCase() + c.slice(1), selected: c === prefill.channel })));
+    const outcome = h("input", { id: "f-out", name: "outcome", placeholder: "e.g. Said he will pay on Friday", required: true, value: prefill.outcome || "" });
+    const note = h("textarea", { id: "f-note", name: "note", placeholder: "Optional details" }); note.value = prefill.note || "";
     const promised = h("input", { type: "checkbox", id: "f-prom" });
     const date = h("input", { type: "date", id: "f-date", name: "promise_date", min: todayISO() });
     const amount = h("input", { id: "f-amt", name: "promise_amount", placeholder: "Optional, e.g. 50,000", inputmode: "decimal" });
@@ -424,6 +443,8 @@
       kpi(3, k.broken_promises ? "alert" : "", "Broken promises", "promises", k.broken_promises ? "Promised date passed, not marked kept" : "None right now", { n: k.broken_promises, f: (n) => String(Math.round(n)) }, k.broken_promises ? "" : "plain"),
     );
 
+    if (CO.extra.dashboardTop) grid.append(...CO.extra.dashboardTop(d));
+
     const chartHost = h("div");
     const drawChart = () => {
       chartHost.replaceChildren(state.chartMode === "age" ? ageChart(d) : trendChart(d, "overdue", false));
@@ -484,9 +505,10 @@
       queueTable(d.queue, { expandable: true }),
       d.waiting.length ? h("div", {}, h("h2", { text: "Waiting (not chasing today)", style: { "text-align": "left", margin: "26px 0 8px" } }),
         h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Customer", "Overdue", "Why"].map((t, i) => h("th", { scope: "col", class: i === 1 ? "r" : "", text: t })))),
-          h("tbody", {}, d.waiting.map((w) => h("tr", {}, h("td", { text: w.customer }), h("td", { class: "r num", text: fmt(w.overdue) }), h("td", {}, h("span", { class: "chip muted", text: w.reason })))))))) : null,
+          h("tbody", {}, d.waiting.map((w) => h("tr", {}, h("td", {}, custLink(w.customer)), h("td", { class: "r num", text: fmt(w.overdue) }), h("td", {}, h("span", { class: "chip muted", text: w.reason })))))))) : null,
       d.review.length ? h("div", { class: "note", style: { "margin-top": "20px" } }, "Promises to review: ", d.review.map((r) => `${r.customer} (${r.reason})`).join("; ")) : null);
-    return h("div", {}, viewHead("Work queue", "Everyone to follow up today, with the rules behind each score. Click a row for the reasons."), h("div", { class: "grid" }, card));
+    return h("div", {}, viewHead("Work queue", "Everyone to follow up today, with the rules behind each score. Click a row for the reasons.",
+      h("a", { class: "btn small ghost", href: "#/callsheet" }, icon("print"), "Call sheet")), h("div", { class: "grid" }, card));
   }
 
   function viewCustomers(d) {
@@ -498,7 +520,7 @@
       const q = state.filter.trim().toLowerCase();
       const rows = d.customers.filter((c) => !q || c.customer.toLowerCase().includes(q));
       body.replaceChildren(...rows.map((c) => h("tr", {},
-        h("td", { text: c.customer }), h("td", { class: "r num", text: fmt(c.outstanding) }), h("td", { class: "r num", text: fmt(c.overdue) }),
+        h("td", {}, custLink(c.customer), c.do_not_contact ? h("span", { class: "chip muted", style: { "margin-left": "8px" }, text: "Do not contact" }) : null), h("td", { class: "r num", text: fmt(c.outstanding) }), h("td", { class: "r num", text: fmt(c.overdue) }),
         ...buckets.map((b, i) => { const v = Number(c.buckets[b] || 0); return h("td", { class: "r" }, v ? h("span", { class: "heat num", text: compact(v), title: fmt(String(v)), style: { "--a": (0.08 + 0.5 * (v / maxes[i])).toFixed(2) } }) : h("span", { class: "sub", text: "–" })); }),
         h("td", { class: "r num", text: String(c.open_invoices) }), h("td", { class: "r num", text: Number(c.overdue) > 0 ? c.oldest_days + "d" : "–" }))));
       if (!rows.length) body.append(h("tr", {}, h("td", { colspan: "11", class: "empty", text: "No customers match." })));
@@ -511,7 +533,7 @@
   }
 
   function viewPromises(d) {
-    const rows = d.promises.map((p) => h("tr", {}, h("td", { text: p.customer }), h("td", { class: "num", text: dmy(p.date) }), h("td", { class: "r num", text: p.amount ? fmt(p.amount) : "–" }),
+    const rows = d.promises.map((p) => h("tr", {}, h("td", {}, custLink(p.customer)), h("td", { class: "num", text: dmy(p.date) }), h("td", { class: "r num", text: p.amount ? fmt(p.amount) : "–" }),
       h("td", {}, h("span", { class: "chip " + (p.state === "broken" ? "broken" : "pending"), text: p.state === "broken" ? "Broken" : "Pending", title: p.state === "broken" ? "The promised date has passed and it was not marked kept" : "The promised date has not arrived yet" })),
       writable() ? h("td", { class: "r" }, h("div", { class: "cellactions" },
         h("button", { type: "button", class: "btn small good", "aria-label": `Mark ${p.customer} promise kept`, text: "Kept", onclick: () => openResolve(p, "kept") }),
@@ -522,36 +544,6 @@
       : h("div", { class: "empty", text: writable() ? "No open promises. When a customer promises a date, use “Log follow-up” and tick “They promised to pay by a date”." : "No open promises." });
     return h("div", {}, viewHead("Promises", "Every open promise to pay. A promise turns 'broken' the day after its date if it isn't marked kept."),
       h("div", { class: "grid" }, h("section", { class: "card glass reveal c4 r-c12", style: { "--i": 0 } }, calendar(d.promises, true)), h("section", { class: "card glass reveal c8 r-c12", style: { "--i": 1 } }, list)));
-  }
-
-  function viewReminders(d) {
-    const names = d.customers.filter((c) => Number(c.overdue) > 0);
-    if (!state.remindFor && names.length) state.remindFor = names[0].customer;
-    const out = h("div", {}), list = h("ul", { class: "picklist" });
-    const sender = store.get("sender", ""), company = store.get("company", "");
-    const load = async () => {
-      if (!state.remindFor) { out.replaceChildren(h("div", { class: "empty", text: "Nobody has overdue invoices." })); return; }
-      out.replaceChildren(h("div", { class: "empty", text: "Preparing draft…" }));
-      try {
-        const q = new URLSearchParams({ customer: state.remindFor, sender, company });
-        if (state.asOf) q.set("as_of", state.asOf);
-        const r = await fetch("/api/draft?" + q); const j = await r.json();
-        if (!r.ok) throw new Error(j.error || "failed");
-        const block = (title, text) => h("div", { style: { "margin-bottom": "18px" } },
-          h("div", { class: "card-head" }, h("h2", { text: title, style: { "font-size": "16px" } }), h("button", { type: "button", class: "btn ghost", onclick: () => copy(text) }, icon("copy"), "Copy")),
-          h("div", { class: "draft", text }));
-        out.replaceChildren(h("div", { style: { "margin-bottom": "14px" } }, writable() ? h("button", { type: "button", class: "btn small", style: { "margin-right": "12px" }, onclick: () => openFollowup(state.remindFor) }, icon("phone"), "Log follow-up") : null, h("span", { class: "chip " + (j.template === "promise_followup" ? "broken" : j.template === "firm" ? "call" : "remind"), text: j.template.replace("_", " ") }),
-          h("span", { class: "sub", text: "  Draft only. Read it, then send it yourself. Nothing is sent from here." })),
-          block("Email: " + j.subject, j.email), block("WhatsApp", j.whatsapp));
-      } catch (e) { out.replaceChildren(h("div", { class: "banner", text: "Could not build the draft: " + e.message })); }
-    };
-    names.forEach((c) => list.append(h("li", {}, h("button", { type: "button", "aria-pressed": String(c.customer === state.remindFor),
-      onclick: (e) => { state.remindFor = c.customer; $$("button", list).forEach((b) => b.setAttribute("aria-pressed", String(b === e.currentTarget))); load(); } },
-      h("span", { text: c.customer }), h("span", { class: "num sub", text: compact(Number(c.overdue)) })))));
-    const hint = !sender || !company ? h("div", { class: "note", style: { "margin-bottom": "14px" } }, "Tip: set your name and company in Settings so drafts are signed correctly.") : null;
-    load();
-    return h("div", {}, viewHead("Reminder drafts", "Fact-only messages built from the invoice data. Nothing is sent automatically."), hint,
-      h("div", { class: "two" }, h("section", { class: "card glass reveal", style: { "--i": 0 } }, list), h("section", { class: "card glass reveal", style: { "--i": 1 } }, out)));
   }
 
   function viewTrend(d) {
@@ -572,6 +564,13 @@
     const dateIn = h("input", { id: "set-date", type: "date", value: d.as_of });
     const rm = h("input", { type: "checkbox", id: "set-rm", checked: store.get("reduce", "0") === "1" });
     rm.addEventListener("change", () => { store.set("reduce", rm.checked ? "1" : "0"); applyMotion(); });
+    const msme = h("input", { type: "checkbox", id: "set-msme", checked: d.settings.msme_supplier });
+    msme.addEventListener("change", async () => {
+      try { await post("/api/setting", { key: "msme_supplier", value: msme.checked ? "1" : "0", actor: actor() }); toast("Saved"); await load(); }
+      catch (e) { msme.checked = !msme.checked; toast(e.message); }
+    });
+    const lang = h("select", { id: "set-lang", onchange: (e) => { store.set("lang", e.target.value); toast("Saved"); } },
+      h("option", { value: "en", text: "English", selected: store.get("lang", "en") === "en" }), h("option", { value: "hinglish", text: "Hinglish (Hindi in Roman letters)", selected: store.get("lang", "en") === "hinglish" }));
     return h("div", {}, viewHead("Settings", "Saved in this browser only."),
       h("div", { class: "grid" }, h("section", { class: "card glass reveal c6 r-c12", style: { "--i": 0 } }, h("h2", { text: "Drafts and date", style: { "text-align": "left", "margin-bottom": "16px" } }),
         h("div", { class: "field" }, h("label", { for: "set-name", text: "Your name (signs reminder drafts)" }), nameIn),
@@ -582,11 +581,18 @@
           updateAvatar(); toast("Saved"); load();
         } }),
         h("div", { class: "field", style: { "margin-top": "22px" } }, h("label", { for: "set-rm" }, rm, " Reduce motion (turns off 3D movement and animation)"))),
-      h("section", { class: "card glass reveal c6 r-c12", style: { "--i": 1 } }, h("h2", { text: "About your data", style: { "text-align": "left", "margin-bottom": "16px" } }),
+      h("section", { class: "card glass reveal c6 r-c12", style: { "--i": 1 } }, h("h2", { text: "Your data", style: { "text-align": "left", "margin-bottom": "16px" } }),
         h("div", { class: "note", text: state.session.writable
-          ? "This page is served from this computer only. The only changes it can make are the ones you save (follow-ups, promise outcomes, snapshots); they go into your local database and audit log. Nothing is uploaded, and no message is ever sent to a customer."
+          ? "This page is served from this computer only. The only changes it can make are the ones you save (imports, follow-ups, promise outcomes, snapshots, notes); they go into your local database and audit log. Nothing is uploaded, and no message is ever sent to a customer."
           : "This dashboard is running in read-only mode and is served from this computer only. Nothing is uploaded, and no message is sent to any customer." }),
         h("p", { class: "sub", text: `Database: ${d.db_name}` }),
+        h("div", { style: { display: "flex", gap: "10px", "flex-wrap": "wrap", margin: "14px 0" } },
+          h("a", { class: "btn small", href: "/backup.db", download: "" }, icon("download"), "Download a backup copy"),
+          h("button", { type: "button", class: "btn small ghost", onclick: () => go("activity") }, icon("activity"), "See everything that changed")),
+        h("p", { class: "sub", text: "A backup is the whole database as one file. It contains your customers' details, so keep it as private as the original exports." }),
+        writable() ? h("div", { class: "field", style: { "margin-top": "22px" } }, h("label", { for: "set-msme" }, msme, " I am a registered micro or small enterprise (Udyam). Mark invoices older than 45 days."),
+          h("span", { class: "hint", text: d.settings.msme_caution })) : null,
+        h("div", { class: "field", style: { "margin-top": "14px" } }, h("label", { for: "set-lang", text: "Default language for reminder drafts" }), lang),
         h("p", { class: "sub", text: "Figures describe the data supplied. They are not accounting, tax or legal advice and do not predict or guarantee collections." }))));
   }
 
@@ -598,20 +604,34 @@
     if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, () => toast("Select the text and copy it manually"));
     else { const ta = h("textarea", { style: { position: "fixed", opacity: "0" } }); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand("copy"); done(); } catch { toast("Select the text and copy it manually"); } ta.remove(); }
   }
-  const VIEWS = { dashboard: viewDashboard, queue: viewQueue, customers: viewCustomers, promises: viewPromises, reminders: viewReminders, trend: viewTrend, settings: viewSettings };
+  const VIEWS = { dashboard: viewDashboard, queue: viewQueue, customers: viewCustomers, promises: viewPromises, trend: viewTrend, settings: viewSettings };
+  const TITLES = {};
+  function registerView(id, label, ico, fn) {
+    VIEWS[id] = fn; TITLES[id] = label;
+    if (ico && !NAV.some((n) => n[0] === id)) NAV.push([id, label, ico]);
+  }
   function go(id) { location.hash = "#/" + id; }
+  function route() {
+    const [id, ...rest] = (location.hash.replace("#/", "") || "dashboard").split("/");
+    return { id: VIEWS[id] ? id : "dashboard", param: rest.length ? decodeURIComponent(rest.join("/")) : "" };
+  }
   function render() {
-    const id = (location.hash.replace("#/", "") || "dashboard"); state.view = VIEWS[id] ? id : "dashboard";
-    $$("#nav a").forEach((a) => (a.dataset.id === state.view ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
+    const { id, param } = route(); state.view = id;
+    const lit = PARENT[id] || id;
+    $$("#nav a").forEach((a) => (a.dataset.id === lit ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
     const v = $("#view");
     if (!state.data) { v.replaceChildren(h("div", { class: "empty", text: "Loading…" })); return; }
     hideTip();
-    v.replaceChildren(VIEWS[state.view](state.data));
-    document.title = `${NAV.find((n) => n[0] === state.view)[1]} · CollectOS`;
+    const node = VIEWS[state.view](state.data, param);
+    v.replaceChildren(node);
+    if (node && typeof node.then === "function") node.then((n) => { if (route().id === id && n) v.replaceChildren(n); });
+    document.title = `${(NAV.find((n) => n[0] === state.view) || [])[1] || TITLES[state.view] || "CollectOS"} · CollectOS`;
+    window.scrollTo({ top: 0 });
   }
   function buildNav() {
     const nav = $("#nav");
-    nav.replaceChildren(...NAV.map(([id, label, ico]) => h("li", {}, h("a", { href: "#/" + id, "data-id": id, title: label }, icon(ico), h("span", { class: "nav-label", text: label }),
+    const ordered = [...NAV].sort((a, b) => NAV_ORDER.indexOf(a[0]) - NAV_ORDER.indexOf(b[0]));
+    nav.replaceChildren(...ordered.map(([id, label, ico]) => h("li", {}, h("a", { href: "#/" + id, "data-id": id, title: label }, icon(ico), h("span", { class: "nav-label", text: label }),
       id === "queue" ? h("span", { class: "badge", id: "queueBadge", hidden: true }) : null))));
   }
   function applyChrome() {
@@ -629,12 +649,14 @@
   function updateAvatar() { const n = store.get("sender", ""); $("#avatar").textContent = (n[0] || "Y").toUpperCase(); $("#userName").textContent = n || "You"; }
   function applyMotion() { document.documentElement.classList.toggle("reduce-motion", store.get("reduce", "0") === "1"); }
 
-  async function load() {
+  // quiet=true refreshes the data and the header/sidebar badges but leaves the current screen as it is
+  // (used by multi-step flows such as the import wizard, which must not be rebuilt mid-way).
+  async function load(quiet = false) {
     const q = state.asOf ? "?as_of=" + encodeURIComponent(state.asOf) : "";
     try {
       const r = await fetch("/api/overview" + q); const j = await r.json();
       if (!r.ok) throw new Error(j.error || r.statusText);
-      state.data = j; state.calYM = null; $("#banner").replaceChildren(); applyChrome(); render();
+      state.data = j; state.calYM = null; $("#banner").replaceChildren(); applyChrome(); if (!quiet) render();
     } catch (e) {
       $("#banner").replaceChildren(h("div", { class: "banner", role: "alert", text: "Could not load data: " + e.message }));
       if (!state.data) $("#view").replaceChildren();
@@ -656,7 +678,7 @@
       const q = s.value.trim().toLowerCase(); res.replaceChildren();
       if (!q || !state.data) { res.classList.remove("open"); return; }
       const hits = state.data.customers.filter((c) => c.customer.toLowerCase().includes(q)).slice(0, 8);
-      res.append(...(hits.length ? hits.map((c) => h("button", { type: "button", role: "option", onclick: () => { state.filter = c.customer; s.value = ""; res.classList.remove("open"); go("customers"); render(); } },
+      res.append(...(hits.length ? hits.map((c) => h("button", { type: "button", role: "option", onclick: () => { s.value = ""; res.classList.remove("open"); go("customer/" + encodeURIComponent(c.customer)); } },
         h("span", { text: c.customer }), h("span", { class: "sub num", text: compact(Number(c.overdue)) + " overdue" }))) : [h("div", { class: "sub", style: { padding: "10px 12px" }, text: "No customers match." })]));
       res.classList.add("open");
     });
@@ -671,7 +693,32 @@
     if (state.data) render();
   }
 
-  buildNav();
-  $$("[data-icon]").forEach((s) => s.replaceChildren(icon(s.dataset.icon)));
-  applyMotion(); updateAvatar(); wire(); render(); startSession(); load();
+  async function getJSON(path, params = {}) {
+    const q = new URLSearchParams(params);
+    if (state.asOf && !q.has("as_of")) q.set("as_of", state.asOf);
+    const r = await fetch(path + (q.toString() ? "?" + q : "")); let j = {};
+    try { j = await r.json(); } catch { /* non-JSON error body */ }
+    if (!r.ok) throw new Error(j.error || `request failed (${r.status})`);
+    return j;
+  }
+  // raw-file upload (imports and bank statements); the file name travels in a header, never in the URL path
+  async function upload(path, file, params = {}) {
+    const q = new URLSearchParams(params); const r = await fetch(path + (q.toString() ? "?" + q : ""), {
+      method: "POST", body: file, headers: { "Content-Type": "application/octet-stream", "X-CollectOS-Token": state.session.token, "X-Filename": encodeURIComponent(file.name || "upload") } });
+    let j = {}; try { j = await r.json(); } catch { /* non-JSON error body */ }
+    if (!r.ok) throw new Error(j.error || `upload failed (${r.status})`);
+    return j;
+  }
+
+  const CO = window.CO = {
+    h, $, $$, icon, svgEl, fmt, fmt0, compact, dmy, dm, pct, plural, state, store, toast, openModal, field, post, upload, getJSON, load, go, render,
+    writable, actor, reduceMotion, tilt, withTip, showTip, hideTip, chart3d, donut3d, queueTable, calendar, viewHead, custLink, custHref, copy,
+    todayISO, countUp, openFollowup, openResolve, openSnapshot, registerView, dlg, extra: {}, BAR_TOP, BAR_BOT, DONUT, NAV_ORDER,
+  };
+
+  document.addEventListener("DOMContentLoaded", () => {
+    buildNav();
+    $$("[data-icon]").forEach((s) => s.replaceChildren(icon(s.dataset.icon)));
+    applyMotion(); updateAvatar(); wire(); render(); startSession(); load();
+  });
 })();

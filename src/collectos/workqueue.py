@@ -150,7 +150,10 @@ def build_queue(
             continue
 
         rel = reliability.get(key)
-        kept, past_broken = (getattr(rel, "kept", 0), getattr(rel, "broken", 0)) if rel is not None else (0, 0)
+        kept, rel_broken = (getattr(rel, "kept", 0), getattr(rel, "broken", 0)) if rel is not None else (0, 0)
+        # reliability counts open promises that are past their date as broken; those are already scored
+        # above as "broken promise", so only the resolved ones belong to the history here
+        past_broken = max(0, rel_broken - len(broken))
         total_out = totals[name].outstanding if name in totals else summary.outstanding
         limit = credit_limits.get(key)
         over_limit = limit is not None and total_out > limit

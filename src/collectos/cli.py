@@ -281,6 +281,7 @@ def run_demo(out: Path, as_of: date) -> None:
     for ago, _, action in sorted(events, key=lambda e: (-e[0], e[1])):
         with Store(db, now=clock(ago)) as store:
             action(store)
+    _enrich_demo(db, as_of, ranked, clock, final)
 
     print(f"Final export: {len(final.invoices)} invoices valid, {len(final.errors)} rows rejected, "
           f"{len(final.duplicates)} duplicate rows flagged, {len(final.warnings)} warning(s):")
@@ -306,6 +307,40 @@ def run_demo(out: Path, as_of: date) -> None:
     print("\nSynthetic five-week history:")
     _print_trend(snapshots)
     print(f"\nDemo kit written to {out}/\n  {csv_path.name}  (synthetic input)\n  {xlsx.name}  (owner report, incl. Trend sheet)\n  {drafts.name}  (reminder drafts, never sent)\n  {db.name}  (demo database)")
+
+
+def _enrich_demo(db: Path, as_of: date, ranked: list[str], clock, final) -> None:
+    """Give the demo contacts, credit limits, a dispute, a do-not-contact customer and a promise that
+    looks paid, so every screen has something real to show. All details are obviously fake."""
+    with Store(db, now=clock(3)) as store:
+        outstanding = {}
+        for inv in store.invoices():
+            outstanding[customer_key(inv.customer)] = outstanding.get(customer_key(inv.customer), Decimal("0")) + inv.outstanding
+        for n, name in enumerate(ranked[:8]):
+            store.update_customer(name, "demo", contact_person=f"Accounts team ({name.split()[0]})", phone=f"98765 {10001 + n}",
+                                  email=f"accounts{n + 1}@example.invalid", preferred_channel="whatsapp" if n % 2 == 0 else "call")
+        for n, factor in ((0, Decimal("0.8")), (1, Decimal("1.5")), (2, Decimal("0.5"))):
+            if n < len(ranked):
+                store.update_customer(ranked[n], "demo", credit_limit=str((outstanding[customer_key(ranked[n])] * factor).quantize(Decimal("1"))))
+        if len(ranked) > 7:
+            store.update_customer(ranked[7], "demo", do_not_contact=True, notes="Owner is handling this account personally.")
+        if len(ranked) > 1:
+            big = max((i for i in store.invoices() if customer_key(i.customer) == customer_key(ranked[1]) and i.outstanding > 0), key=lambda i: i.outstanding)
+            store.open_dispute(big.invoice_no, ranked[1], "price", "demo", note="Customer says the rate differs from the quotation.", owner="Sales manager")
+        store.set_setting("msme_supplier", "1", "demo")
+    if len(ranked) > 5:
+        # A promise whose payment then shows up in the next export: the dashboard suggests it was kept.
+        with Store(db, now=clock(8)) as store:
+            target = max((i for i in store.invoices() if customer_key(i.customer) == customer_key(ranked[5]) and i.outstanding > 0), key=lambda i: i.outstanding)
+            amount = min(target.outstanding, Decimal("50000"))
+            store.log_followup(ranked[5], "call", "Promised a transfer", actor="demo", promise_date=as_of + timedelta(days=2), promise_amount=amount)
+        with Store(db, now=clock(0)) as store:
+            rows = [["Invoice No", "Customer", "Invoice Date", "Due Date", "Amount", "Paid"]]
+            for i in store.invoices():
+                paid = i.paid + amount if i.invoice_no == target.invoice_no and customer_key(i.customer) == customer_key(target.customer) else i.paid
+                rows.append([i.invoice_no, i.customer, i.invoice_date.strftime("%d-%m-%Y"), "" if i.due_date is None else i.due_date.strftime("%d-%m-%Y"), f"{i.amount:.2f}", f"{paid:.2f}"])
+            store.apply_import(import_rows(list(enumerate(rows, start=1))), actor="demo")
+            store.take_snapshot(as_of, actor="demo")
 
 
 # ---- helpers --------------------------------------------------------------------

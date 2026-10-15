@@ -136,7 +136,7 @@ def test_demo_builds_the_full_kit(capsys, tmp_path):
     wb = load_workbook(out_dir / "owner_report.xlsx")
     assert wb["Summary"]["A1"].value.startswith("Receivables summary: Demo Distributors (synthetic data)")
     with Store(out_dir / "demo.db") as s:
-        assert len(s.open_promises()) == 2 and len(s.followups()) == 5
+        assert len(s.open_promises()) == 3 and len(s.followups()) == 6   # incl. the promise whose payment then arrived
     # Re-running into a non-empty folder is refused, never overwritten.
     code, _, err = run(capsys, "demo", str(out_dir))
     assert code == 1 and "not empty" in err
