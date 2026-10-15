@@ -27,3 +27,6 @@ data/*
 # Generated demo kits (regenerate with: collectos demo ./demo-kit)
 demo-kit/
 *-kit/
+
+# Commercial material (pricing, outreach, prospect lists) must never be pushed to a public repo
+sales-kit/

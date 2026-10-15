@@ -8,7 +8,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from . import synthetic
+from . import roi, synthetic
 from .ageing import Status, assess
 from .dates import DateError, parse_date
 from .importer import ImportFileError, import_invoices, import_rows
@@ -76,6 +76,10 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("out", help="output .xlsx path")
     p.add_argument("--company", required=True)
     p.set_defaults(func=_cmd_report)
+
+    p = sub.add_parser("roi-sheet", help="write the customer ROI calculator workbook (editable assumptions, live formulas)")
+    p.add_argument("out", help="output .xlsx path")
+    p.set_defaults(func=_cmd_roi_sheet)
 
     p = sub.add_parser("snapshot", parents=[common], help="record today's measures (take one on day 1 as the baseline, then weekly)")
     p.set_defaults(func=_cmd_snapshot)
@@ -168,6 +172,11 @@ def _cmd_report(args) -> int:
     path = write_owner_report(args.out, company=args.company, as_of=as_of, invoices=invoices, queue=queue,
                               open_promises=promises, followups=followups, snapshots=snapshots)
     print(f"Wrote {path}")
+    return 0
+
+
+def _cmd_roi_sheet(args) -> int:
+    print(f"Wrote {roi.write_calculator(args.out)}  (defaults are illustrative placeholders; replace them with the prospect's numbers)")
     return 0
 
 
