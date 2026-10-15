@@ -36,6 +36,8 @@ collectos trend --db data/acme.db                          # snapshots side by s
 collectos report owner.xlsx --company "Sharma Steel" --db data/acme.db   # adds a Trend sheet once snapshots exist
 ```
 
+`collectos roi-sheet roi.xlsx` writes an editable ROI calculator (live formulas, illustrative defaults) to use with a prospect's own numbers.
+
 **Measured outcomes.** A snapshot records overdue totals, ageing, follow-ups, promises and *payments seen in
 data* (increases in recorded paid amounts that arrived via imports since the previous snapshot, read from the
 audit log). These numbers are descriptive: they do not prove that follow-up work caused any change, and
