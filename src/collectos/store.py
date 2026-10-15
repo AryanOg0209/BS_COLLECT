@@ -16,12 +16,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from .importer import ImportReport
-from .models import Invoice
+from .models import Invoice, Promise, customer_key
 from .money import to_money
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-_SCHEMA = """
+_SCHEMA_V1 = """
 CREATE TABLE imports (
     id INTEGER PRIMARY KEY,
     source TEXT NOT NULL,
@@ -70,6 +70,40 @@ CREATE TRIGGER source_rows_no_delete BEFORE DELETE ON source_rows
 BEGIN SELECT RAISE(ABORT, 'source_rows is append-only'); END;
 """
 
+_SCHEMA_V2 = """
+CREATE TABLE followups (
+    id INTEGER PRIMARY KEY,
+    customer_key TEXT NOT NULL,
+    customer TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    channel TEXT NOT NULL CHECK (channel IN ('call','whatsapp','email','visit','other')),
+    outcome TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE promises (
+    id INTEGER PRIMARY KEY,
+    customer_key TEXT NOT NULL,
+    customer TEXT NOT NULL,
+    followup_id INTEGER NOT NULL REFERENCES followups(id),
+    promised_date TEXT NOT NULL,
+    promised_paise INTEGER CHECK (promised_paise IS NULL OR promised_paise > 0),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','kept','broken','cancelled')),
+    resolved_ts TEXT,
+    resolution_note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_followups_customer ON followups(customer_key, ts);
+CREATE INDEX idx_promises_open ON promises(status, promised_date);
+CREATE TRIGGER followups_no_update BEFORE UPDATE ON followups
+BEGIN SELECT RAISE(ABORT, 'followups is append-only'); END;
+CREATE TRIGGER followups_no_delete BEFORE DELETE ON followups
+BEGIN SELECT RAISE(ABORT, 'followups is append-only'); END;
+CREATE TRIGGER promises_no_delete BEFORE DELETE ON promises
+BEGIN SELECT RAISE(ABORT, 'promises cannot be deleted; cancel them instead'); END;
+"""
+
+_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2}
+
 
 class StoreError(RuntimeError):
     pass
@@ -85,6 +119,20 @@ class ApplyResult:
     warnings: list[str] = field(default_factory=list)
 
 
+CHANNELS = ("call", "whatsapp", "email", "visit", "other")
+
+
+@dataclass(frozen=True)
+class FollowUp:
+    id: int
+    customer: str
+    ts: str
+    actor: str
+    channel: str
+    outcome: str
+    note: str
+
+
 @dataclass(frozen=True)
 class AuditEntry:
     id: int
@@ -96,10 +144,6 @@ class AuditEntry:
     before: dict | None
     after: dict | None
     reason: str
-
-
-def customer_key(name: str) -> str:
-    return " ".join(name.split()).casefold()
 
 
 def to_paise(amount: Decimal) -> int:
@@ -135,12 +179,12 @@ class Store:
 
     def _migrate(self) -> None:
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
-        if version == 0:
-            with self._db:
-                self._db.executescript(_SCHEMA)
-                self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif version != SCHEMA_VERSION:
-            raise StoreError(f"database schema v{version} is not supported (expected v{SCHEMA_VERSION})")
+        if version > SCHEMA_VERSION:
+            raise StoreError(f"database schema v{version} is not supported (this build supports up to v{SCHEMA_VERSION})")
+        for target in range(version + 1, SCHEMA_VERSION + 1):
+            with self._db:  # each step is atomic; a failed step leaves the previous version intact
+                self._db.executescript("BEGIN;" + _MIGRATIONS[target])
+                self._db.execute(f"PRAGMA user_version = {target}")
 
     # ---- writes -----------------------------------------------------------------
 
@@ -230,11 +274,11 @@ class Store:
         rows = self._db.execute("SELECT id, invoice_no, customer FROM invoices ORDER BY id").fetchall()
         return [f"{r['invoice_no']} ({r['customer']})" for r in rows if r["id"] not in seen_ids]
 
-    def _audit(self, ts, actor, action, entity_id, before, after, reason) -> None:
+    def _audit(self, ts, actor, action, entity_id, before, after, reason, entity="invoice") -> None:
         self._db.execute(
             "INSERT INTO audit_log (ts, actor, action, entity, entity_id, before_json, after_json, reason) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            (ts, actor, action, "invoice", entity_id,
+            (ts, actor, action, entity, entity_id,
              None if before is None else json.dumps(before, sort_keys=True),
              None if after is None else json.dumps(after, sort_keys=True), reason),
         )
@@ -269,6 +313,105 @@ class Store:
             "SELECT row_no, disposition, note, raw_json FROM source_rows WHERE import_id = ? ORDER BY id",
             (import_id,),
         ).fetchall()
+
+    # ---- follow-ups and promises ------------------------------------------------
+
+    def log_followup(
+        self,
+        customer: str,
+        channel: str,
+        outcome: str,
+        actor: str,
+        note: str = "",
+        promise_date: date | None = None,
+        promise_amount: Decimal | None = None,
+    ) -> tuple[int, int | None]:
+        """Record a contact attempt; optionally record the promise made during it.
+
+        Returns (followup_id, promise_id or None). Both rows are written atomically.
+        """
+        if channel not in CHANNELS:
+            raise StoreError(f"channel must be one of {', '.join(CHANNELS)}")
+        if not outcome.strip():
+            raise StoreError("outcome is required (what happened on the contact?)")
+        key = customer_key(customer)
+        known = self._db.execute(
+            "SELECT customer FROM invoices WHERE customer_key = ? LIMIT 1", (key,)
+        ).fetchone()
+        if known is None:
+            raise StoreError(f"unknown customer {customer!r}: import their invoices first")
+        now = self._now()
+        if promise_date is None and promise_amount is not None:
+            raise StoreError("promise_amount given without promise_date")
+        if promise_date is not None and promise_date < now.date():
+            raise StoreError(f"promise_date {promise_date} is in the past")
+        paise = None if promise_amount is None else to_paise(promise_amount)
+        if paise is not None and paise <= 0:
+            raise StoreError("promise_amount must be positive")
+
+        ts = now.isoformat(timespec="seconds")
+        with self._db:
+            followup_id = self._db.execute(
+                "INSERT INTO followups (customer_key, customer, ts, actor, channel, outcome, note) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (key, known["customer"], ts, actor, channel, outcome.strip(), note.strip()),
+            ).lastrowid
+            self._audit(ts, actor, "followup.logged", followup_id, None,
+                        {"customer": known["customer"], "channel": channel, "outcome": outcome.strip()},
+                        note.strip(), entity="followup")
+            promise_id = None
+            if promise_date is not None:
+                promise_id = self._db.execute(
+                    "INSERT INTO promises (customer_key, customer, followup_id, promised_date, promised_paise) "
+                    "VALUES (?,?,?,?,?)",
+                    (key, known["customer"], followup_id, promise_date.isoformat(), paise),
+                ).lastrowid
+                self._audit(ts, actor, "promise.created", promise_id, None,
+                            {"customer": known["customer"], "promised_date": promise_date.isoformat(), "promised_paise": paise},
+                            f"followup #{followup_id}", entity="promise")
+        return followup_id, promise_id
+
+    def resolve_promise(self, promise_id: int, status: str, actor: str, note: str = "") -> None:
+        """Close an open promise as kept / broken / cancelled. Closed promises stay closed."""
+        if status not in ("kept", "broken", "cancelled"):
+            raise StoreError("status must be kept, broken or cancelled")
+        row = self._db.execute("SELECT status FROM promises WHERE id = ?", (promise_id,)).fetchone()
+        if row is None:
+            raise StoreError(f"no promise #{promise_id}")
+        if row["status"] != "open":
+            raise StoreError(f"promise #{promise_id} is already {row['status']}")
+        ts = self._now().isoformat(timespec="seconds")
+        with self._db:
+            self._db.execute(
+                "UPDATE promises SET status = ?, resolved_ts = ?, resolution_note = ? WHERE id = ?",
+                (status, ts, note.strip(), promise_id),
+            )
+            self._audit(ts, actor, f"promise.{status}", promise_id, {"status": "open"}, {"status": status},
+                        note.strip(), entity="promise")
+
+    def open_promises(self) -> list[Promise]:
+        rows = self._db.execute(
+            "SELECT * FROM promises WHERE status = 'open' ORDER BY promised_date, id"
+        ).fetchall()
+        return [
+            Promise(
+                r["id"], r["customer"], r["customer_key"], date.fromisoformat(r["promised_date"]),
+                None if r["promised_paise"] is None else from_paise(r["promised_paise"]), r["status"],
+            )
+            for r in rows
+        ]
+
+    def last_contacts(self) -> dict[str, date]:
+        """Date of the most recent follow-up per customer key."""
+        rows = self._db.execute("SELECT customer_key, MAX(ts) AS ts FROM followups GROUP BY customer_key").fetchall()
+        return {r["customer_key"]: datetime.fromisoformat(r["ts"]).date() for r in rows}
+
+    def followups(self, customer: str | None = None) -> list[FollowUp]:
+        sql, args = "SELECT * FROM followups", ()
+        if customer is not None:
+            sql, args = sql + " WHERE customer_key = ?", (customer_key(customer),)
+        rows = self._db.execute(sql + " ORDER BY id", args).fetchall()
+        return [FollowUp(r["id"], r["customer"], r["ts"], r["actor"], r["channel"], r["outcome"], r["note"]) for r in rows]
 
     # ---- operations -------------------------------------------------------------
 

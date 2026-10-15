@@ -52,3 +52,18 @@ def _parse_text(text: str) -> Decimal:
         raise MoneyError(f"not a valid amount: {text!r}")
     amount = Decimal(cleaned)
     return -amount if negative else amount
+
+
+def format_inr(amount: Decimal) -> str:
+    """Format with Indian digit grouping, e.g. ₹2,50,000.00. Display only; never parse this back."""
+    amount = to_money(amount)
+    sign = "-" if amount < 0 else ""
+    whole, frac = f"{abs(amount):.2f}".split(".")
+    head, tail = whole[:-3], whole[-3:]
+    groups = []
+    while len(head) > 2:
+        groups.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        groups.insert(0, head)
+    return f"{sign}₹{','.join(groups + [tail])}.{frac}"

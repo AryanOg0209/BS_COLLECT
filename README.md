@@ -18,8 +18,8 @@ Codename only; not a registered brand. Status: early build, validating with real
 | 1 | Money + invoice model + ageing rules (pure, no I/O) | done |
 | 2 | Import pipeline (CSV/Excel/Tally-style export → validated invoices + issue report) | done |
 | 3 | SQLite persistence + append-only audit log | done |
-| 4 | Work queue (priority + reasons) + promise-to-pay log | next |
-| 5 | Reminder drafts + owner report (Excel) | planned |
+| 4 | Work queue (transparent priority rules + reasons) + follow-up / promise-to-pay log | done |
+| 5 | Reminder drafts + owner report (Excel) | next |
 | 6 | CLI + synthetic demo data | planned |
 
 ## Develop

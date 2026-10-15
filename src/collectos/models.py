@@ -11,6 +11,11 @@ class InvoiceError(ValueError):
     """Raised when an invoice record violates a basic invariant."""
 
 
+def customer_key(name: str) -> str:
+    """Case- and whitespace-insensitive identity for a customer name."""
+    return " ".join(name.split()).casefold()
+
+
 @dataclass(frozen=True)
 class Invoice:
     invoice_no: str
@@ -55,3 +60,15 @@ class Invoice:
             self.amount,
             self.paid,
         )
+
+
+@dataclass(frozen=True)
+class Promise:
+    """A customer's commitment to pay by a date, optionally for an amount."""
+
+    id: int
+    customer: str
+    customer_key: str
+    promised_date: date
+    promised_amount: Decimal | None
+    status: str

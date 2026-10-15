@@ -1,12 +1,11 @@
 """Ageing rules: pure functions over Invoice, no I/O."""
 
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from enum import Enum
 
-from .models import Invoice
+from .models import Invoice, customer_key
 
 DEFAULT_EDGES: tuple[int, ...] = (30, 60, 90)
 
@@ -92,14 +91,15 @@ class CustomerSummary:
 
 
 def summarise_by_customer(results: list[Ageing]) -> dict[str, CustomerSummary]:
-    """Roll open balances up per customer. Settled and overpaid invoices are excluded."""
-    summaries: dict[str, CustomerSummary] = defaultdict(lambda: CustomerSummary(""))
+    """Roll open balances up per customer (name variants by case/spacing are merged).
+
+    Settled and overpaid invoices are excluded. Keys are the first-seen display name.
+    """
+    by_key: dict[str, CustomerSummary] = {}
     for r in results:
         if r.status in (Status.PAID, Status.OVERPAID):
             continue
-        name = r.invoice.customer
-        s = summaries[name]
-        s.customer = name
+        s = by_key.setdefault(customer_key(r.invoice.customer), CustomerSummary(r.invoice.customer))
         s.outstanding += r.outstanding
         s.open_invoices += 1
         s.by_bucket[r.bucket] = s.by_bucket.get(r.bucket, _ZERO) + r.outstanding
@@ -107,4 +107,4 @@ def summarise_by_customer(results: list[Ageing]) -> dict[str, CustomerSummary]:
             s.overdue += r.outstanding
             s.overdue_invoices += 1
             s.max_days_overdue = max(s.max_days_overdue, r.days_overdue)
-    return dict(summaries)
+    return {s.customer: s for s in by_key.values()}
