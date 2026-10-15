@@ -16,6 +16,7 @@ it with textContent only, never as HTML.
 """
 
 import json
+import re
 import secrets
 import tempfile
 import threading
@@ -28,7 +29,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .contacts import mailto_link, tel_link, whatsapp_link
 from .dates import DateError, parse_date
-from .importer import import_invoices
+from .ai import FIELDS, AiError, AiInputError, AiUnavailable, Assistant
+from .importer import ColumnMap, NoInvoiceTable, import_invoices
 from .matcher import StatementError, parse_statement, suggest
 from .money import MoneyError, to_money
 from .readers import read_sheets
@@ -58,6 +60,11 @@ WRITE_ROUTES = {
     "/api/import/apply": ("json", "_post_import_apply"),
     "/api/import/preview": ("upload", "_post_import_preview"),
     "/api/statement/match": ("upload", "_post_statement"),
+    "/api/import/layout": ("json", "_post_import_layout"),
+    "/api/import/preview-mapped": ("json", "_post_import_preview_mapped"),
+    "/api/ai/reply": ("json", "_post_ai_reply"),
+    "/api/ai/columns": ("json", "_post_ai_columns"),
+    "/api/ai/remittance": ("upload", "_post_ai_remittance"),
 }
 CONTENT_TYPES = {"json": "application/json", "upload": "application/octet-stream"}
 MAX_BODY = 64 * 1024
@@ -111,6 +118,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._overview(query)
             if url.path == "/api/draft":
                 return self._draft(query)
+            if url.path == "/api/ai/status":
+                with Store(self.server.db_path) as store:
+                    return self._json(200, Assistant(store, client=self.server.ai_client).status())
             if url.path == "/api/customer":
                 return self._customer(query)
             if url.path == "/api/activity":
@@ -172,6 +182,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, result)
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._error(400, "body is not valid JSON")
+        except AiUnavailable as exc:
+            self._error(409, str(exc))
+        except AiError as exc:
+            self._error(502, str(exc))
         except (StoreError, DateError, MoneyError, ValueError, KeyError, TypeError) as exc:
             self._error(400, f"missing field {exc}" if isinstance(exc, KeyError) else str(exc))
         except Exception:  # an unreadable or hostile file must never produce a stack trace for the page
@@ -267,10 +281,42 @@ class _Handler(BaseHTTPRequestHandler):
             report = import_invoices(upload.path, default_credit_days=self._credit_days(query.get("credit_days")), source=upload.name)
             with Store(self.server.db_path) as store:
                 diff = store.diff_import(report)
+        except NoInvoiceTable as exc:
+            # keep the file: the person can map the columns by hand (or ask the AI helper) and carry on
+            with Store(self.server.db_path) as store:
+                ai_ready = self._ai_ready(store)
+            return {"needs_mapping": True, "upload_id": upload.id, "filename": upload.name, "message": str(exc), "ai_available": ai_ready}
         except BaseException:
             self.server.uploads.discard(upload.id)
             raise
-        return {
+        return self._preview_payload(upload, report, diff)
+
+    def _ai_ready(self, store: Store) -> bool:
+        a = Assistant(store, client=self.server.ai_client)
+        return store.get_setting("ai_assist") == "1" and a.key_present and a.sdk_present
+
+    def _mapping_from(self, body: dict, require: bool = True) -> ColumnMap | None:
+        raw = body.get("mapping") if "mapping" in body else body
+        if not isinstance(raw, dict) or "columns" not in raw:
+            if require:
+                raise ValueError("the column mapping is missing")
+            return None
+        columns, header_row = raw["columns"], raw.get("header_row")
+        if not isinstance(columns, dict) or not isinstance(header_row, int) or isinstance(header_row, bool):
+            raise ValueError("the column mapping is malformed")
+        mapped = {}
+        for name, col in columns.items():
+            if name not in FIELDS:
+                raise ValueError(f"unknown field {name!r} in the column mapping")
+            if not isinstance(col, int) or isinstance(col, bool) or col < 0:
+                raise ValueError("column numbers must be whole numbers (0 = not in the file)")
+            if col:
+                mapped[name] = col - 1
+        sheet = raw.get("sheet")
+        return ColumnMap(sheet if isinstance(sheet, str) else None, header_row, mapped)
+
+    def _preview_payload(self, upload, report, diff, mapping: ColumnMap | None = None) -> dict:
+        payload = {
             "upload_id": upload.id, "filename": upload.name, "sheet": report.sheet,
             "valid": len(report.invoices), "duplicates": len(report.duplicates), "skipped_rows": len(report.skipped_rows),
             "error_count": len(report.errors), "errors": [{"row": e.row_no, "message": e.message} for e in report.errors[:50]],
@@ -286,10 +332,42 @@ class _Handler(BaseHTTPRequestHandler):
                 "missing": [{"invoice_no": n, "customer": c, "outstanding": _m(o)} for n, c, o in diff.missing[:200]],
             },
         }
+        if mapping is not None:
+            payload["mapping"] = {"sheet": mapping.sheet, "header_row": mapping.header_row, "columns": {f: c + 1 for f, c in mapping.columns.items()}}
+        return payload
+
+    def _post_import_layout(self, body: dict) -> dict:
+        """The top of the file as the person would see it, so they can pick the header row and columns."""
+        upload = self.server.uploads.get(_text(body, "upload_id", required=True))
+        sheets = read_sheets(upload.path)
+        out = []
+        for name, rows in sheets[:6]:
+            shown = [{"row": n, "cells": [("" if c is None else str(c).strip()[:40]) for c in cells[:14]]} for n, cells in rows[:25]]
+            if any(any(r["cells"]) for r in shown):
+                out.append({"name": name, "rows": shown})
+        guess = None
+        for sheet in out:
+            for r in sheet["rows"]:
+                filled = [c for c in r["cells"] if c]
+                if len(filled) >= 3 and not any(re.fullmatch(r"[\d,.\s₹-]+", c) for c in filled):
+                    guess = {"sheet": sheet["name"], "header_row": r["row"]}
+                    break
+            if guess:
+                break
+        return {"upload_id": upload.id, "filename": upload.name, "sheets": out, "guess": guess, "fields": list(FIELDS)}
+
+    def _post_import_preview_mapped(self, body: dict) -> dict:
+        upload = self.server.uploads.get(_text(body, "upload_id", required=True))
+        mapping = self._mapping_from(body)
+        report = import_invoices(upload.path, default_credit_days=self._credit_days(body.get("credit_days")), source=upload.name, column_map=mapping)
+        with Store(self.server.db_path) as store:
+            diff = store.diff_import(report)
+        return self._preview_payload(upload, report, diff, mapping)
 
     def _post_import_apply(self, body: dict) -> dict:
         upload = self.server.uploads.get(_text(body, "upload_id", required=True))
-        report = import_invoices(upload.path, default_credit_days=self._credit_days(body.get("credit_days")), source=upload.name)
+        report = import_invoices(upload.path, default_credit_days=self._credit_days(body.get("credit_days")), source=upload.name,
+                                 column_map=self._mapping_from(body, require=False))
         actor = _actor(body)
         with Store(self.server.db_path) as store:
             diff = store.diff_import(report)
@@ -329,6 +407,29 @@ class _Handler(BaseHTTPRequestHandler):
                 "invoice_nos": list(s.invoice_nos), "matched_outstanding": _m(s.matched_outstanding), "reasons": list(s.reasons),
                 "promise_ids": list(s.promise_ids)} for s in suggestions],
         }
+
+    def _assistant(self, store: Store, body: dict | None = None) -> Assistant:
+        return Assistant(store, actor=_actor(body or {}), client=self.server.ai_client)
+
+    def _post_ai_reply(self, body: dict) -> dict:
+        as_of = parse_date(_text(body, "as_of")) if _text(body, "as_of") else date.today()
+        with Store(self.server.db_path) as store:
+            return self._assistant(store, body).read_reply(_text(body, "text", required=True, limit=4000), as_of)
+
+    def _post_ai_columns(self, body: dict) -> dict:
+        upload = self.server.uploads.get(_text(body, "upload_id", required=True))
+        with Store(self.server.db_path) as store:
+            return self._assistant(store, body).map_columns(read_sheets(upload.path))
+
+    def _post_ai_remittance(self, data: bytes, query: dict) -> dict:
+        media = _sniff_media_type(data)
+        if media is None:
+            raise AiInputError("Use a PDF or a PNG/JPEG photo.")
+        with Store(self.server.db_path) as store:
+            result = self._assistant(store).read_remittance(data, media)
+            # match against the invoices we hold: a suggestion with reasons, never an automatic change
+            result["matches"] = _match_remittance(store, result)
+        return result
 
     # -- handlers --------------------------------------------------------------
     def _static(self, name: str) -> None:
@@ -405,6 +506,46 @@ class _Handler(BaseHTTPRequestHandler):
                    {"Content-Disposition": f'attachment; filename="owner-report-{as_of.isoformat()}.xlsx"'})
 
 
+def _sniff_media_type(data: bytes) -> str | None:
+    """Decide the file type from its first bytes, never from what the browser claims."""
+    if data.startswith(b"%PDF"):
+        return "application/pdf"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:4] == b"GIF8":
+        return "image/gif"
+    return None
+
+
+def _match_remittance(store: Store, result: dict) -> list[dict]:
+    """Look each invoice number on a remittance up in our records. Pure lookup; nothing is changed."""
+    held = {}
+    for inv in store.invoices():
+        held.setdefault(re.sub(r"[^A-Z0-9]", "", inv.invoice_no.upper()), []).append(inv)
+    out = []
+    for line in result["invoices"]:
+        found = held.get(re.sub(r"[^A-Z0-9]", "", line["invoice_no"].upper()), [])
+        if len(found) == 1:
+            inv = found[0]
+            net = Decimal(line["net"]) if line["net"] else None
+            tds = Decimal(line["tds"]) if line["tds"] else Decimal("0.00")
+            gross = Decimal(line["gross"]) if line["gross"] else None
+            notes = []
+            if gross is not None and gross != inv.outstanding:
+                notes.append(f"the remittance says gross {gross:.2f} but we show {inv.outstanding:.2f} outstanding")
+            if net is not None and gross is not None and net + tds != gross:
+                notes.append("net plus TDS does not equal the gross on the document")
+            out.append({"invoice_no": inv.invoice_no, "customer": inv.customer, "outstanding": _m(inv.outstanding), "gross": line["gross"], "tds": line["tds"],
+                        "net": line["net"], "found": True, "settles": net is not None and net + tds == inv.outstanding, "notes": notes})
+        else:
+            out.append({"invoice_no": line["invoice_no"], "found": False, "ambiguous": len(found) > 1, "notes": ["not found in your invoices" if not found else "more than one customer has this invoice number"]})
+    return out
+
+
 def _text(body: dict, key: str, required: bool = False, limit: int = 2000) -> str:
     value = body.get(key)
     if value is None or value == "":
@@ -426,12 +567,13 @@ def _actor(body: dict) -> str:
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, db_path: str | Path, port: int = 0, read_only: bool = False):
+    def __init__(self, db_path: str | Path, port: int = 0, read_only: bool = False, ai_client=None):
         super().__init__(("127.0.0.1", port), _Handler)  # loopback only
         self.db_path = str(db_path)
         self.read_only = read_only
         self.token = secrets.token_urlsafe(32)  # new on every start; never written to disk
         self.uploads = UploadStore()
+        self.ai_client = ai_client  # None means: build a real client from the environment when AI is used (tests inject a fake)
         actual = self.server_address[1]
         self.allowed_hosts = {f"127.0.0.1:{actual}", f"localhost:{actual}"}
 
@@ -444,10 +586,10 @@ class DashboardServer(ThreadingHTTPServer):
         return f"http://127.0.0.1:{self.server_address[1]}/"
 
 
-def make_server(db_path: str | Path, port: int = 0, read_only: bool = False) -> DashboardServer:
+def make_server(db_path: str | Path, port: int = 0, read_only: bool = False, ai_client=None) -> DashboardServer:
     if not Path(db_path).is_file():
         raise FileNotFoundError(f"database not found: {db_path} (import data first, or build one with `collectos demo`)")
-    return DashboardServer(db_path, port, read_only)
+    return DashboardServer(db_path, port, read_only, ai_client)
 
 
 def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True, read_only: bool = False) -> None:

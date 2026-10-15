@@ -33,6 +33,23 @@ class ImportFileError(ValueError):
     """The file as a whole cannot be imported (no header, missing columns, ...)."""
 
 
+class NoInvoiceTable(ImportFileError):
+    """No sheet has recognisable invoice columns. The file can still be imported with a column mapping."""
+
+
+@dataclass(frozen=True)
+class ColumnMap:
+    """A person's (or the AI helper's) answer to "which column is which", used instead of auto-detection.
+
+    header_row is the row number as it appears in the file (1-based); columns maps a field name to a
+    0-based column index and holds only the fields that are present.
+    """
+
+    sheet: str | None
+    header_row: int
+    columns: dict[str, int]
+
+
 @dataclass(frozen=True)
 class RowIssue:
     row_no: int
@@ -63,7 +80,8 @@ class ImportReport:
         return not self.errors
 
 
-def import_invoices(path: str | Path, default_credit_days: int | None = None, source: str | None = None) -> ImportReport:
+def import_invoices(path: str | Path, default_credit_days: int | None = None, source: str | None = None,
+                    column_map: ColumnMap | None = None) -> ImportReport:
     """Read a CSV/XLSX file and return validated invoices and a full issue report.
 
     Every worksheet is searched for the invoice table; the first one that has it is used
@@ -71,16 +89,19 @@ def import_invoices(path: str | Path, default_credit_days: int | None = None, so
     invoice_date + N days; each filled invoice number is listed in the report.
     """
     path = Path(path)
-    return import_sheets(read_sheets(path), source=source or path.name, default_credit_days=default_credit_days)
+    return import_sheets(read_sheets(path), source=source or path.name, default_credit_days=default_credit_days, column_map=column_map)
 
 
 def import_rows(rows: RawRows, source: str = "<memory>", default_credit_days: int | None = None) -> ImportReport:
     return import_sheets([(None, rows)], source=source, default_credit_days=default_credit_days)
 
 
-def import_sheets(sheets: list[Sheet], source: str = "<memory>", default_credit_days: int | None = None) -> ImportReport:
+def import_sheets(sheets: list[Sheet], source: str = "<memory>", default_credit_days: int | None = None,
+                  column_map: ColumnMap | None = None) -> ImportReport:
     found = []
-    for name, rows in sheets:
+    if column_map is not None:
+        found.append(_apply_column_map(sheets, column_map))
+    for name, rows in ([] if column_map is not None else sheets):
         try:
             located = _locate_header(rows)
         except ImportFileError as exc:
@@ -88,7 +109,7 @@ def import_sheets(sheets: list[Sheet], source: str = "<memory>", default_credit_
         if located is not None:
             found.append((name, rows, located))
     if not found:
-        raise ImportFileError(_no_header_message(sheets))
+        raise NoInvoiceTable(_no_header_message(sheets))
 
     name, rows, (header_idx, cols, headers) = found[0]
     report = ImportReport(source=source, sheet=name)
@@ -129,6 +150,28 @@ def import_sheets(sheets: list[Sheet], source: str = "<memory>", default_credit_
     if missing_due:
         report.warnings.append(f"{len(missing_due)} invoice(s) have no due date and cannot be aged")
     return report
+
+
+def _apply_column_map(sheets: list[Sheet], cm: ColumnMap):
+    target = next((s for s in sheets if s[0] == cm.sheet), None) if cm.sheet is not None else (sheets[0] if sheets else None)
+    if target is None:
+        raise ImportFileError(f"the sheet {cm.sheet!r} is not in the file")
+    name, rows = target
+    index = next((i for i, (row_no, _) in enumerate(rows) if row_no == cm.header_row), None)
+    if index is None:
+        raise ImportFileError(f"row {cm.header_row} is not in the sheet")
+    unknown = set(cm.columns) - set(FIELD_ALIASES)
+    if unknown:
+        raise ImportFileError(f"unknown fields in the column mapping: {', '.join(sorted(unknown))}")
+    if any(not isinstance(c, int) or isinstance(c, bool) or c < 0 for c in cm.columns.values()):
+        raise ImportFileError("the column mapping holds an invalid column number")
+    if len(set(cm.columns.values())) != len(cm.columns):
+        raise ImportFileError("two fields were mapped to the same column")
+    if not _looks_like_header(cm.columns):
+        raise ImportFileError("the mapping needs invoice number, customer, invoice date and amount or outstanding")
+    cells = rows[index][1]
+    headers = [str(c).strip() if c is not None else "" for c in cells]
+    return name, rows, (index, dict(cm.columns), headers)
 
 
 def _locate_header(rows: RawRows) -> tuple[int, dict[str, int], list[str]] | None:

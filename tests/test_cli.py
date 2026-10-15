@@ -202,3 +202,48 @@ def test_demo_records_five_weekly_snapshots_with_payments_seen(capsys, tmp_path)
     assert all(x.payments_observed > 0 for x in snaps[1:])
     wb = load_workbook(tmp_path / "kit" / "owner_report.xlsx")
     assert "Trend" in wb.sheetnames and wb["Trend"].max_row >= 10
+
+
+# ---- ai-check ---------------------------------------------------------------------------------------------------------
+
+
+def _fake_anthropic(monkeypatch, answers):
+    import json
+    import sys
+    from types import SimpleNamespace
+
+    class Client:
+        def __init__(self):
+            self.messages = self
+
+        def create(self, **kw):
+            item = answers.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(item))], usage=SimpleNamespace(input_tokens=400, output_tokens=80), stop_reason="end_turn")
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=Client))
+
+
+GOOD = {"intent": "promise_to_pay", "promise_date": "2026-10-09", "promise_amount": "50000", "dispute_category": "none",
+        "quote": "Friday tak 50 hazaar", "summary": "x", "confidence": "high"}
+
+
+def test_ai_check_without_a_key_explains_how_to_set_one(capsys):
+    code, _, err = run(capsys, "ai-check")
+    assert code == 1 and "ANTHROPIC_API_KEY=" in err and ".env" in err
+
+
+def test_ai_check_success_prints_cost_and_never_the_key(capsys, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SECRETVALUE")
+    _fake_anthropic(monkeypatch, [GOOD])
+    code, out, err = run(capsys, "ai-check")
+    assert code == 0 and "It works" in out and "promise_to_pay" in out and "$0.000080" in out
+    assert "SECRETVALUE" not in out + err
+
+
+def test_ai_check_reports_a_rejected_key_in_plain_words(capsys, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SECRETVALUE")
+    _fake_anthropic(monkeypatch, [type("AuthenticationError", (Exception,), {})("401 invalid key SECRETVALUE")])
+    code, out, err = run(capsys, "ai-check")
+    assert code == 1 and "key was rejected" in err and "SECRETVALUE" not in out + err

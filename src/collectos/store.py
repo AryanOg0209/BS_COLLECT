@@ -20,9 +20,9 @@ from .errors import StoreError
 from .importer import ImportReport
 from .models import Invoice, Promise, customer_key
 from .money import from_paise, to_money, to_paise
-from .store_extras import SCHEMA_V4, ExtrasMixin
+from .store_extras import SCHEMA_V4, SCHEMA_V5, ExtrasMixin
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA_V1 = """
 CREATE TABLE imports (
@@ -132,7 +132,7 @@ CREATE TRIGGER snapshots_no_delete BEFORE DELETE ON snapshots
 BEGIN SELECT RAISE(ABORT, 'snapshots is append-only'); END;
 """
 
-_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: SCHEMA_V4}
+_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V5}
 
 
 @dataclass

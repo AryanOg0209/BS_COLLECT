@@ -55,9 +55,28 @@ CREATE TABLE settings (
 );
 """
 
+SCHEMA_V5 = """
+CREATE TABLE ai_usage (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    month TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    feature TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cost_micro_usd INTEGER NOT NULL
+);
+CREATE INDEX idx_ai_usage_month ON ai_usage(month);
+CREATE TRIGGER ai_usage_no_update BEFORE UPDATE ON ai_usage
+BEGIN SELECT RAISE(ABORT, 'ai_usage is append-only'); END;
+CREATE TRIGGER ai_usage_no_delete BEFORE DELETE ON ai_usage
+BEGIN SELECT RAISE(ABORT, 'ai_usage is append-only'); END;
+"""
+
 DISPUTE_CATEGORIES = ("price", "quantity", "quality", "delivery", "tax", "duplicate", "other")
 CHANNEL_PREFERENCES = ("", "call", "whatsapp", "email", "visit")
-SETTING_DEFAULTS = {"msme_supplier": "0", "default_country_code": "91"}
+SETTING_DEFAULTS = {"msme_supplier": "0", "default_country_code": "91", "ai_assist": "0", "ai_budget_usd": "2.00", "ai_usd_inr": "90.00"}
 _PAYMENT_ACTIONS = ("invoice.updated", "invoice.settled")
 _UNSET = object()
 
@@ -165,6 +184,10 @@ class ExtrasMixin:
             raise StoreError("msme_supplier must be 0 or 1")
         if key == "default_country_code" and not (value.isdigit() and 1 <= len(value) <= 3):
             raise StoreError("default_country_code must be 1 to 3 digits")
+        if key == "ai_assist" and value not in ("0", "1"):
+            raise StoreError("ai_assist must be 0 or 1")
+        if key in ("ai_budget_usd", "ai_usd_inr"):
+            value = self._money_setting(key, value)
         before = self.get_setting(key)
         if before == value:
             return
@@ -173,6 +196,37 @@ class ExtrasMixin:
             self._db.execute("INSERT INTO settings (key, value, updated_ts) VALUES (?,?,?) "
                              "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_ts = excluded.updated_ts", (key, value, ts))
             self._audit(ts, actor, "setting.changed", None, {key: before}, {key: value}, "", entity="setting")
+
+    @staticmethod
+    def _money_setting(key: str, value: str) -> str:
+        low, high = (Decimal("0"), Decimal("100")) if key == "ai_budget_usd" else (Decimal("1"), Decimal("500"))
+        try:
+            number = Decimal(value)
+        except Exception:
+            raise StoreError(f"{key} must be a number") from None
+        if not number.is_finite() or not low <= number <= high:
+            raise StoreError(f"{key} must be between {low} and {high}")
+        return f"{number.quantize(Decimal('0.01')):.2f}"
+
+    # ---- optional AI assist: what was sent, and what it cost ---------------------------------
+
+    def record_ai_usage(self, feature: str, model: str, input_tokens: int, output_tokens: int, cost_micro_usd: int, actor: str, sent_text: str) -> int:
+        """Append one AI call to the ledger and to the audit log (with exactly the text that left this computer)."""
+        ts = self._now().isoformat(timespec="seconds")
+        with self._db:
+            row_id = self._db.execute(
+                "INSERT INTO ai_usage (ts, month, actor, feature, model, input_tokens, output_tokens, cost_micro_usd) VALUES (?,?,?,?,?,?,?,?)",
+                (ts, ts[:7], actor, feature, model, int(input_tokens), int(output_tokens), int(cost_micro_usd))).lastrowid
+            self._audit(ts, actor, "ai.request", row_id, None,
+                        {"feature": feature, "model": model, "input_tokens": int(input_tokens), "output_tokens": int(output_tokens),
+                         "cost_usd": f"{cost_micro_usd / 1_000_000:.6f}", "sent": sent_text[:4000]}, "", entity="ai")
+        return row_id
+
+    def ai_month_summary(self, month: str | None = None) -> dict:
+        month = month or self._now().isoformat(timespec="seconds")[:7]
+        row = self._db.execute("SELECT COUNT(*) AS calls, COALESCE(SUM(cost_micro_usd), 0) AS cost, COALESCE(SUM(input_tokens), 0) AS tin, "
+                               "COALESCE(SUM(output_tokens), 0) AS tout FROM ai_usage WHERE month = ?", (month,)).fetchone()
+        return {"month": month, "calls": row["calls"], "cost_micro_usd": row["cost"], "input_tokens": row["tin"], "output_tokens": row["tout"]}
 
     # ---- customer master ---------------------------------------------------------------
 

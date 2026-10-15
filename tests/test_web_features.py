@@ -296,7 +296,6 @@ def test_credit_days_fill_missing_due_dates_only_when_asked(server):
 
 
 @pytest.mark.parametrize("data, name, fragment", [
-    (b"not a spreadsheet at all", "x.csv", "could not find"),
     (b"PK\x03\x04junk", "x.xlsx", "damaged"),
     (b"data", "x.exe", ".csv or .xlsx"),
     (b"", "x.csv", "empty"),
@@ -389,3 +388,9 @@ def test_upload_size_limit(server, monkeypatch):
         assert s == 413
     except (ConnectionResetError, BrokenPipeError):
         pass
+
+
+def test_a_file_with_unrecognised_columns_is_kept_for_mapping_not_rejected(server):
+    s, _, p = upload(server, "/api/import/preview", b"not a spreadsheet at all\nsecond line\n", filename="odd.csv")
+    assert s == 200 and p["needs_mapping"] is True and p["filename"] == "odd.csv" and "could not find an invoice table" in p["message"]
+    assert p["ai_available"] is False and len(list(server.uploads.directory.iterdir())) == 1       # waiting for the person

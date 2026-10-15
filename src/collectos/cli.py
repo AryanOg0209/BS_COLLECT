@@ -8,9 +8,10 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from . import roi, synthetic, web
+from . import ai, roi, synthetic, web
 from .ageing import Status, assess
 from .dates import DateError, parse_date
+from .envfile import load_env_file
 from .importer import ImportFileError, import_invoices, import_rows
 from .models import Invoice, customer_key
 from .money import MoneyError, format_inr, to_money
@@ -25,6 +26,9 @@ _USER_ERRORS = (StoreError, ImportFileError, UnsupportedFile, DateError, MoneyEr
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if not os.environ.get("COLLECTOS_NO_DOTENV"):  # set this to ignore a .env file entirely
+        for warning in load_env_file(Path.cwd() / ".env"):
+            print(f"warning: {warning}", file=sys.stderr)
     args = _parser().parse_args(argv)
     try:
         return args.func(args)
@@ -83,6 +87,10 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--no-open", action="store_true", help="do not open a browser window")
     p.add_argument("--read-only", action="store_true", help="disable all buttons that change data (useful when showing the screen)")
     p.set_defaults(func=_cmd_ui)
+
+    p = sub.add_parser("ai-check", help="make ONE tiny AI request to confirm your key, model and answer format work (costs a fraction of a paisa)")
+    p.add_argument("--model", help=f"model to test (default: COLLECTOS_AI_MODEL or {ai.DEFAULT_MODEL})")
+    p.set_defaults(func=_cmd_ai_check)
 
     p = sub.add_parser("roi-sheet", help="write the customer ROI calculator workbook (editable assumptions, live formulas)")
     p.add_argument("out", help="output .xlsx path")
@@ -179,6 +187,30 @@ def _cmd_report(args) -> int:
 
 def _cmd_ui(args) -> int:
     web.serve(args.db, port=args.port, open_browser=not args.no_open, read_only=args.read_only)
+    return 0
+
+
+def _cmd_ai_check(args) -> int:
+    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        raise ValueError("no API key found. Put a line ANTHROPIC_API_KEY=your-key in the .env file in this folder (or export it), then run this again.")
+    try:
+        import anthropic
+    except ImportError:
+        raise ValueError("the AI add-on is not installed. Run: pip install 'collectos[ai]'") from None
+    model = args.model or os.environ.get("COLLECTOS_AI_MODEL") or ai.DEFAULT_MODEL
+    print(f"Sending one small test message to {model} (the key is read from your environment and is never printed)...")
+    try:
+        result = ai.check_connection(anthropic.Anthropic(), model)
+    except Exception as exc:
+        raise ValueError(str(ai.Assistant._translate(exc))) from None
+    a = result["answer"]
+    usd = Decimal(result["cost_micro_usd"]) / Decimal(1_000_000)
+    print(f"It works. The model read 'Bhai Friday tak 50 hazaar bhej dunga' as: {a['intent']}, date {a['promise_date'] or 'none'}, amount {a['promise_amount'] or 'none'} "
+          f"(confidence {a['confidence']}).")
+    print(f"Used {result['input_tokens']} input and {result['output_tokens']} output tokens: about ${usd:.6f} (roughly Rs {usd * 90:.4f}).")
+    if model not in ai.PRICES:
+        print("Note: this model is not in the price table, so spending is estimated at the highest known rate.")
+    print("Next: open the dashboard, go to Settings, and switch on 'AI assist'.")
     return 0
 
 

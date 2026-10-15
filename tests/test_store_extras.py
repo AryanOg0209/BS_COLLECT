@@ -321,12 +321,47 @@ def test_activity_feed_is_newest_first_labelled_and_paged(store):
     assert len(store.activity(limit=10_000)) <= 500
 
 
-def test_v3_database_migrates_to_v4(tmp_path):
+def test_v3_database_migrates_to_the_current_version(tmp_path):
     db = tmp_path / "v3.db"
     raw = sqlite3.connect(db)
     raw.executescript(store_module._SCHEMA_V1 + store_module._SCHEMA_V2 + store_module._SCHEMA_V3)
     raw.execute("PRAGMA user_version = 3")
     raw.commit(); raw.close()
     with Store(db, now=Clock()) as s:
-        assert s._db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert s._db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
         assert s.customer_profiles() == {} and s.disputes() == [] and s.get_setting("default_country_code") == "91"
+
+
+# ---- AI settings and the usage ledger ---------------------------------------------------------------------------
+
+
+def test_ai_settings_default_off_and_validate(store):
+    assert (store.get_setting("ai_assist"), store.get_setting("ai_budget_usd"), store.get_setting("ai_usd_inr")) == ("0", "2.00", "90.00")
+    store.set_setting("ai_assist", "1", "a")
+    store.set_setting("ai_budget_usd", "5", "a")
+    store.set_setting("ai_usd_inr", "88.5", "a")
+    assert (store.get_setting("ai_assist"), store.get_setting("ai_budget_usd"), store.get_setting("ai_usd_inr")) == ("1", "5.00", "88.50")
+    for key, value in (("ai_assist", "yes"), ("ai_budget_usd", "-1"), ("ai_budget_usd", "101"), ("ai_budget_usd", "abc"), ("ai_budget_usd", "NaN"),
+                       ("ai_usd_inr", "0"), ("ai_usd_inr", "501")):
+        with pytest.raises(StoreError):
+            store.set_setting(key, value, "a")
+
+
+def test_ai_usage_is_recorded_with_exactly_what_was_sent(store, clock):
+    store.record_ai_usage("reply_reader", "claude-haiku-5-5", 400, 80, 1234, "priya", "Customer said: Friday tak kar dunga")
+    store.record_ai_usage("columns", "claude-haiku-5-5", 600, 120, 2000, "priya", "row 1: | Date | Party |")
+    summary = store.ai_month_summary()
+    assert (summary["calls"], summary["cost_micro_usd"], summary["input_tokens"], summary["output_tokens"]) == (2, 3234, 1000, 200)
+    entry = [e for e in store.audit_entries() if e.action == "ai.request"][0]
+    assert entry.actor == "priya" and entry.after["sent"] == "Customer said: Friday tak kar dunga" and entry.after["cost_usd"] == "0.001234"
+
+
+def test_ai_usage_is_per_month_and_append_only(store, clock):
+    store.record_ai_usage("reply_reader", "m", 1, 1, 100, "a", "x")
+    clock.tick(40)
+    store.record_ai_usage("reply_reader", "m", 1, 1, 50, "a", "y")
+    assert store.ai_month_summary("2026-10")["cost_micro_usd"] == 100 and store.ai_month_summary("2026-11")["cost_micro_usd"] == 50
+    assert store.ai_month_summary("2030-01")["calls"] == 0
+    for sql in ("UPDATE ai_usage SET cost_micro_usd = 0", "DELETE FROM ai_usage"):
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            store._db.execute(sql)
