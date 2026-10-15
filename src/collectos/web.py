@@ -535,12 +535,14 @@ def _match_remittance(store: Store, result: dict) -> list[dict]:
             tds = Decimal(line["tds"]) if line["tds"] else Decimal("0.00")
             gross = Decimal(line["gross"]) if line["gross"] else None
             notes = []
-            if gross is not None and gross != inv.outstanding:
+            if inv.outstanding == 0:
+                notes.append("already shown as paid in your records")
+            elif gross is not None and gross != inv.outstanding:
                 notes.append(f"the remittance says gross {gross:.2f} but we show {inv.outstanding:.2f} outstanding")
             if net is not None and gross is not None and net + tds != gross:
                 notes.append("net plus TDS does not equal the gross on the document")
             out.append({"invoice_no": inv.invoice_no, "customer": inv.customer, "outstanding": _m(inv.outstanding), "gross": line["gross"], "tds": line["tds"],
-                        "net": line["net"], "found": True, "settles": net is not None and net + tds == inv.outstanding, "notes": notes})
+                        "net": line["net"], "found": True, "settles": inv.outstanding > 0 and net is not None and net + tds == inv.outstanding, "notes": notes})
         else:
             out.append({"invoice_no": line["invoice_no"], "found": False, "ambiguous": len(found) > 1, "notes": ["not found in your invoices" if not found else "more than one customer has this invoice number"]})
     return out

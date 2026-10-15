@@ -326,3 +326,12 @@ def test_a_remittance_that_exactly_settles_an_invoice_is_pointed_out(tmp_path, s
     stop(srv)
     out = upload(srv, "/api/ai/remittance", b"%PDF-1.4 fake", filename="a.pdf")[1]
     assert out["matches"][0]["settles"] is True                   # net 49,000 + TDS 1,000 = 50,000, exactly the outstanding
+
+
+def test_a_remittance_for_an_already_paid_invoice_says_so_and_offers_no_settle(tmp_path, stop):
+    srv, _ = start(tmp_path, remit(invoices=[{"invoice_no": "INV-1042", "gross": "50000", "tds": "1000", "net": "49000"}]))
+    stop(srv)
+    with Store(srv.db_path) as st:
+        st.settle_invoices([("INV-1042", "Acme Traders")], "t")
+    m = upload(srv, "/api/ai/remittance", b"%PDF-1.4 fake", filename="a.pdf")[1]["matches"][0]
+    assert m["found"] is True and m["settles"] is False and m["notes"] == ["already shown as paid in your records"]

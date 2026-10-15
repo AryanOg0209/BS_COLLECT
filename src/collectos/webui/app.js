@@ -354,7 +354,7 @@
   }
   const dlg = $("#modal");
   dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
-  function openModal({ title, intro, fields, submit, onSubmit, danger = false, wide = false }) {
+  function openModal({ title, intro, fields, submit, onSubmit, danger = false, wide = false, quiet = false }) {
     dlg.classList.toggle("wide", wide);
     const err = h("div", { class: "form-error", role: "alert", hidden: true });
     const go = h("button", { type: "submit", class: "btn" + (danger ? " bad" : ""), text: submit });
@@ -362,7 +362,7 @@
       h("div", { class: "modal-actions" }, h("button", { type: "button", class: "btn ghost", text: "Cancel", onclick: () => dlg.close() }), go));
     form.addEventListener("submit", async (e) => {
       e.preventDefault(); err.hidden = true; go.disabled = true;
-      try { const msg = await onSubmit(new FormData(form)); dlg.close(); toast(msg || "Saved"); await load(); }
+      try { const msg = await onSubmit(new FormData(form)); dlg.close(); toast(msg || "Saved"); await load(quiet); }
       catch (ex) { err.textContent = ex.message; err.hidden = false; go.disabled = false; }
     });
     dlg.replaceChildren(h("div", { class: "modal-inner" }, form));
@@ -385,7 +385,9 @@
     promised.addEventListener("change", () => { box.hidden = !promised.checked; if (promised.checked) date.focus(); });
     openModal({
       title: "Log a follow-up", intro: "Record what happened on this contact. If the customer promised a date, note it so it can be tracked.",
-      fields: [h("datalist", { id: "f-cust-list" }, names.map((n) => h("option", { value: n }))), field("Customer", cust), field("How did you contact them?", channel), field("What happened?", outcome), field("Notes", note),
+      fields: [h("datalist", { id: "f-cust-list" }, names.map((n) => h("option", { value: n }))), field("Customer", cust),
+        CO.extra.followupAssist ? CO.extra.followupAssist({ cust, channel, outcome, note, promised, date, amount, box }) : null,
+        field("How did you contact them?", channel), field("What happened?", outcome), field("Notes", note),
         h("label", { class: "checkrow" }, promised, h("span", { text: "They promised to pay by a date" })), box],
       submit: "Save follow-up",
       onSubmit: async () => {
@@ -593,7 +595,8 @@
         writable() ? h("div", { class: "field", style: { "margin-top": "22px" } }, h("label", { for: "set-msme" }, msme, " I am a registered micro or small enterprise (Udyam). Mark invoices older than 45 days."),
           h("span", { class: "hint", text: d.settings.msme_caution })) : null,
         h("div", { class: "field", style: { "margin-top": "14px" } }, h("label", { for: "set-lang", text: "Default language for reminder drafts" }), lang),
-        h("p", { class: "sub", text: "Figures describe the data supplied. They are not accounting, tax or legal advice and do not predict or guarantee collections." }))));
+        h("p", { class: "sub", text: "Figures describe the data supplied. They are not accounting, tax or legal advice and do not predict or guarantee collections." })),
+      CO.extra.settingsAi ? CO.extra.settingsAi(d) : null));
   }
 
   /* ---------- shell ---------- */

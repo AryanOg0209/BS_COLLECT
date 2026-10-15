@@ -357,8 +357,9 @@
       const onFile = async (file) => {
         busy.replaceChildren(spinner(`Reading ${file.name}…`));
         try {
+          const credit = cb.checked ? n.value : "";
           const p = await upload("/api/import/preview", file, cb.checked ? { credit_days: n.value } : {});
-          previewStep(p, cb.checked ? n.value : "");
+          if (p.needs_mapping) mappingStep(p, credit); else previewStep(p, credit);
         } catch (e) { pickStep(e.message); }
       };
       body.replaceChildren(steps(1), card("c12", 0,
@@ -366,6 +367,66 @@
         dropzone(onFile, "Drop your invoice export here"),
         h("div", { class: "field", style: { "margin-top": "16px" } }, h("label", { class: "checkrow", for: "imp-credit" }, cb, h("span", {}, "Some invoices have no due date. Fill them in as invoice date + ", n, " days (recorded in the log)."))),
         h("p", { class: "sub", text: "Works with an Excel or CSV export from Tally, Zoho, Busy or a spreadsheet: it looks for the columns invoice number, customer, invoice date, due date and amount or outstanding. Files stay on this computer and are deleted after use." }), busy));
+    }
+    async function mappingStep(p, creditDays) {
+      body.replaceChildren(steps(1), card("c12", 0, spinner(`Looking at ${p.filename}…`)));
+      let layout;
+      try { layout = await post("/api/import/layout", { upload_id: p.upload_id }); } catch (e) { pickStep(e.message); return; }
+      if (!layout.sheets.length) { pickStep("That file looks empty."); return; }
+      const LABELS = { invoice_no: "Invoice number *", customer: "Customer name *", invoice_date: "Invoice date *", due_date: "Due date", amount: "Invoice amount (this or outstanding) *", paid: "Amount paid so far", outstanding: "Outstanding / pending amount (this or amount) *" };
+      let sheetIdx = Math.max(0, layout.guess ? layout.sheets.findIndex((x) => x.name === layout.guess.sheet) : 0);
+      const rowsOf = () => layout.sheets[sheetIdx].rows;
+      const headerIn = h("input", { id: "map-header", type: "number", min: "1", class: "tiny", "aria-label": "Header row", value: String(layout.guess ? layout.guess.header_row : rowsOf()[0].row) });
+      const sheetSel = layout.sheets.length > 1 ? h("select", { id: "map-sheet", "aria-label": "Sheet" }, ...layout.sheets.map((x, i) => h("option", { value: String(i), text: x.name || `Sheet ${i + 1}`, selected: i === sheetIdx }))) : null;
+      const selects = Object.fromEntries(layout.fields.map((f) => [f, h("select", { id: `map-${f}` })]));
+      const note = h("div"), grid = h("div", { class: "tablewrap" });
+      const headerCells = () => { const r = rowsOf().find((x) => x.row === Number(headerIn.value)); return r ? r.cells : []; };
+      function rebuild(keep = {}) {
+        const cells = headerCells();
+        for (const f of layout.fields) {
+          const sel = selects[f], prev = keep[f] !== undefined ? String(keep[f]) : sel.value;
+          sel.replaceChildren(h("option", { value: "0", text: "— not in this file —" }), ...cells.map((c, i) => h("option", { value: String(i + 1), text: `Column ${i + 1}: ${c || "(blank)"}` })));
+          sel.value = Array.from(sel.options).some((o) => o.value === prev) ? prev : "0";
+        }
+      }
+      function paintGrid() {
+        const rows = rowsOf(), cols = Math.max(...rows.map((r) => r.cells.length), 1);
+        grid.replaceChildren(h("table", { class: "layoutgrid" }, h("thead", {}, h("tr", {}, h("th", { text: "Row" }), ...Array.from({ length: cols }, (_, i) => h("th", { text: `Col ${i + 1}` })))),
+          h("tbody", {}, rows.map((r) => h("tr", { class: r.row === Number(headerIn.value) ? "hdr" : "" }, h("td", { text: String(r.row) }), ...Array.from({ length: cols }, (_, i) => h("td", { text: r.cells[i] || "" })))))));
+      }
+      headerIn.addEventListener("input", () => { paintGrid(); rebuild(); });
+      if (sheetSel) sheetSel.addEventListener("change", () => { sheetIdx = Number(sheetSel.value); headerIn.value = String(rowsOf()[0].row); paintGrid(); rebuild(); });
+      paintGrid(); rebuild();
+
+      const aiBtn = h("button", { type: "button", class: "btn small", onclick: async (e) => {
+        const btn = e.currentTarget; btn.disabled = true; note.replaceChildren(h("div", { class: "sub", text: "Asking the AI (only the column titles are sent; every data cell is replaced by its type)…" }));
+        try {
+          const sug = await post("/api/ai/columns", { upload_id: p.upload_id, actor: actor() });
+          const idx = layout.sheets.findIndex((x) => x.name === sug.sheet);
+          if (idx >= 0) { sheetIdx = idx; if (sheetSel) sheetSel.value = String(idx); }
+          headerIn.value = String(sug.header_row); paintGrid();
+          rebuild(Object.fromEntries(layout.fields.map((f) => [f, sug.columns[f] || 0])));
+          note.replaceChildren(h("div", { class: "note" }, `The AI suggests these columns (${sug.confidence} confidence). ${sug.notes || ""} Check each choice against the table above before pressing Check these columns.`));
+        } catch (ex) { note.replaceChildren(h("div", { class: "form-error", role: "alert", text: ex.message })); } finally { btn.disabled = false; }
+      } }, icon("chat"), "Suggest with AI");
+      const check = h("button", { type: "button", class: "btn", text: "Check these columns", onclick: async (e) => {
+        const btn = e.currentTarget; btn.disabled = true;
+        try {
+          const columns = Object.fromEntries(layout.fields.map((f) => [f, Number(selects[f].value)]));
+          const preview = await post("/api/import/preview-mapped", { upload_id: p.upload_id, sheet: layout.sheets[sheetIdx].name, header_row: Number(headerIn.value), columns, credit_days: creditDays === "" ? null : Number(creditDays) });
+          previewStep(preview, creditDays);
+        } catch (ex) { note.replaceChildren(h("div", { class: "form-error", role: "alert", text: ex.message })); btn.disabled = false; }
+      } });
+      body.replaceChildren(steps(1), h("div", { class: "grid" }, card("c12", 0,
+        h("h2", { text: "Which column is which?", style: { "text-align": "left" } }),
+        h("p", { class: "sub", text: "CollectOS did not recognise the column titles in this file. Nothing has been saved. Tell it which column holds what; this works with any export. You will still see a full preview before anything is saved." }),
+        h("details", { class: "why" }, h("summary", { text: "What the automatic check found" }), h("pre", { class: "pre", text: p.message })),
+        sheetSel ? field("Sheet", sheetSel) : null, field("Which row holds the column titles? (row number)", headerIn), grid,
+        h("div", { class: "mapgrid" }, layout.fields.map((f) => field(LABELS[f], selects[f]))),
+        note,
+        h("div", { class: "modal-actions", style: { "justify-content": "flex-start", "flex-wrap": "wrap" } }, check, p.ai_available ? aiBtn : null,
+          h("button", { type: "button", class: "btn ghost", text: "Choose another file", onclick: () => pickStep() })),
+        p.ai_available ? null : h("p", { class: "sub", style: { "margin-top": "10px" }, text: "Optional: switch on AI assist in Settings to get a suggested mapping." }))));
     }
     function previewStep(p, creditDays) {
       const df = p.diff, bad = p.error_count > 0;
@@ -375,7 +436,7 @@
         const btn = e.currentTarget; btn.disabled = true; btn.textContent = "Saving…";
         try {
           const needConfirm = df.missing_count > 0;
-          const out = await post("/api/import/apply", { upload_id: p.upload_id, allow_errors: optErr.checked, take_snapshot: optSnap.checked && !needConfirm, credit_days: creditDays === "" ? null : Number(creditDays), actor: actor() });
+          const out = await post("/api/import/apply", { upload_id: p.upload_id, allow_errors: optErr.checked, take_snapshot: optSnap.checked && !needConfirm, credit_days: creditDays === "" ? null : Number(creditDays), actor: actor(), mapping: p.mapping });
           await load(true);
           if (needConfirm) confirmStep(out, optSnap.checked); else doneStep(out, null);
         } catch (ex) { btn.disabled = false; btn.textContent = "Save this import"; CO.$("#imp-error").textContent = ex.message; CO.$("#imp-error").hidden = false; }
@@ -442,6 +503,7 @@
     root.append(viewHead("Match bank credits", "Upload a bank statement and see which customer and invoices each credit may be for. These are suggestions with reasons; nothing is changed and balances still come from your accounting export."), body);
     if (!writable()) { body.append(card("c12", 0, readOnlyNote())); return root; }
     pick();
+    root.append(remittanceCard());
     return root;
 
     function pick(error) {
@@ -480,6 +542,125 @@
     }
   });
 
+  /* ---------- optional AI assist: always off until switched on in Settings ---------- */
+  const INTENTS = { promise_to_pay: "promises to pay", already_paid: "says it is already paid", dispute: "disputes the invoice", needs_more_time: "asks for more time", refuses: "refuses to pay", wrong_person: "says wrong person", unclear: "unclear" };
+  async function aiStatus() { try { return await getJSON("/api/ai/status"); } catch { return null; } }
+  const tick = (ok) => h("span", { class: "chip " + (ok ? "pending" : "broken"), text: ok ? "Yes" : "No" });
+
+  CO.extra.settingsAi = (d) => {
+    const host = h("div", {}, spinner("Checking…"));
+    const paint = (st) => {
+      if (!st) { host.replaceChildren(h("div", { class: "banner", text: "Could not read the AI status." })); return; }
+      const toggle = h("input", { type: "checkbox", id: "ai-on", checked: st.enabled, disabled: !writable() });
+      toggle.addEventListener("change", async () => {
+        try { await post("/api/setting", { key: "ai_assist", value: toggle.checked ? "1" : "0", actor: actor() }); toast(toggle.checked ? "AI assist is on" : "AI assist is off"); paint(await aiStatus()); }
+        catch (e) { toggle.checked = !toggle.checked; toast(e.message); }
+      });
+      const cap = h("input", { id: "ai-cap", class: "tiny", style: { width: "90px" }, value: String(Math.round(Number(st.budget_inr))), inputmode: "numeric", "aria-label": "Monthly cap in rupees" });
+      const save = h("button", { type: "button", class: "btn small ghost", text: "Save cap", onclick: async () => {
+        try { const usd = (Number(cap.value) / Number(st.usd_inr)).toFixed(2); await post("/api/setting", { key: "ai_budget_usd", value: usd, actor: actor() }); toast("Cap saved"); paint(await aiStatus()); } catch (e) { toast(e.message); }
+      } });
+      host.replaceChildren(
+        h("p", { class: "sub", text: "Optional and off by default. When on, three helpers can use Claude: a reply reader (paste what a customer wrote and it fills in the promise), a column helper (for exports CollectOS does not recognise) and a remittance reader (a customer's payment advice). Only what you choose to send leaves this computer, and every request is listed in Activity with exactly what was sent." }),
+        h("ul", { class: "sendlist" },
+          h("li", {}, h("b", { text: "Reply reader: " }), "only the pasted text, with phone numbers, emails, PAN, GSTIN and long account numbers masked."),
+          h("li", {}, h("b", { text: "Column helper: " }), "only title rows; every data cell is replaced by its type, so no customer name or amount is sent."),
+          h("li", {}, h("b", { text: "Remittance reader: " }), "the one document you pick, after you confirm.")),
+        writable() ? h("label", { class: "checkrow", for: "ai-on" }, toggle, h("span", { text: "Switch on AI assist" })) : null,
+        h("dl", { class: "facts", style: { margin: "14px 0" } },
+          h("dt", { text: "Add-on installed" }), h("dd", {}, tick(st.sdk_present), st.sdk_present ? "" : h("span", { class: "sub", text: "  run: pip install 'collectos[ai]'" })),
+          h("dt", { text: "API key found" }), h("dd", {}, tick(st.key_present), st.key_present ? "" : h("span", { class: "sub", text: "  add a line ANTHROPIC_API_KEY=... to the .env file, then restart" })),
+          h("dt", { text: "Model" }), h("dd", { text: st.model + (st.model_known ? "" : " (not in the price table; costs are estimated at the highest rate)") }),
+          h("dt", { text: "This month" }), h("dd", { text: `${plural(st.calls, "request")}, about ₹${st.cost_inr} of ₹${st.budget_inr}` })),
+        writable() ? h("div", { class: "field" }, h("label", { for: "ai-cap", text: "Monthly spending cap (₹)" }), h("div", { style: { display: "flex", gap: "10px", "align-items": "center" } }, cap, save),
+          h("span", { class: "hint", text: `Calls stop once the estimate reaches the cap. Estimates use token prices from ${st.model_known ? "a built-in table" : "the dearest known rate"} and ₹${st.usd_inr} per US dollar; the real bill is on your Anthropic account.` })) : null,
+        h("div", { class: "head-actions" }, h("button", { type: "button", class: "btn small ghost", onclick: () => go("activity") }, icon("activity"), "See what was sent")));
+    };
+    (async () => paint(await aiStatus()))();
+    return card("c12", 3, h("h2", { text: "AI assist (optional)", style: { "text-align": "left", "margin-bottom": "12px" } }), host);
+  };
+
+  CO.extra.followupAssist = (ctx) => {
+    const wrap = h("div", { class: "ai-assist", hidden: true });
+    (async () => {
+      const st = await aiStatus();
+      if (!st) return;
+      wrap.hidden = false;
+      if (!st.enabled) { wrap.replaceChildren(h("p", { class: "sub", text: "Tip: switch on AI assist in Settings to fill this in from a pasted customer reply." })); return; }
+      if (!st.sdk_present || !st.key_present) { wrap.replaceChildren(h("p", { class: "sub", text: "AI assist is on but not ready (add-on or API key missing). See Settings." })); return; }
+      const reply = h("textarea", { id: "f-reply", placeholder: "Paste what the customer wrote (WhatsApp, SMS or email). English, Hindi or Hinglish." });
+      const out = h("div");
+      const read = h("button", { type: "button", class: "btn small", onclick: async () => {
+        if (!reply.value.trim()) { out.replaceChildren(h("div", { class: "form-error", text: "Paste the customer's reply first." })); return; }
+        read.disabled = true; out.replaceChildren(h("div", { class: "sub", text: "Reading…" }));
+        try {
+          const r = await post("/api/ai/reply", { text: reply.value, actor: actor() });
+          if (!ctx.outcome.value) ctx.outcome.value = r.summary;
+          if (!ctx.note.value) ctx.note.value = "Customer wrote: " + reply.value.trim().slice(0, 600);
+          if (r.promise_date || r.promise_amount) {
+            ctx.promised.checked = true; ctx.promised.dispatchEvent(new Event("change"));
+            if (r.promise_date) ctx.date.value = r.promise_date;
+            if (r.promise_amount) ctx.amount.value = String(Number(r.promise_amount));
+          }
+          out.replaceChildren(h("div", { class: "note" },
+            h("div", {}, h("span", { class: "chip " + (r.confidence === "high" ? "pending" : r.confidence === "medium" ? "conf medium" : "broken"), text: `${r.confidence} confidence` }), " ",
+              h("b", { text: `The customer ${INTENTS[r.intent] || r.intent}.` })),
+            r.quote ? h("div", { class: "sub", text: `Based on: “${r.quote}”` }) : null,
+            ...r.warnings.map((w) => h("div", { class: "sub", style: { color: "var(--warn)" }, text: w })),
+            r.intent === "dispute" ? h("div", { class: "sub", text: `This sounds like a dispute${r.dispute_category ? " about " + r.dispute_category : ""}. After saving, you can mark the invoice as disputed from the customer's page.` }) : null,
+            h("div", { class: "sub", text: "The form below is filled in as a suggestion. Check it, then press Save." }),
+            Object.keys(r.masked || {}).length ? h("div", { class: "sub", text: `Masked before sending: ${Object.entries(r.masked).map(([k, v]) => `${v} ${k}`).join(", ")}.` }) : null));
+        } catch (e) { out.replaceChildren(h("div", { class: "form-error", role: "alert", text: e.message })); } finally { read.disabled = false; }
+      } }, icon("chat"), "Read the reply");
+      wrap.replaceChildren(h("div", { class: "field" }, h("label", { for: "f-reply", text: "Paste their reply (optional, uses AI)" }), reply,
+        h("span", { class: "hint", text: "Only this text is sent, with phone numbers and emails masked. It fills in the form below; you confirm." })), read, out);
+    })();
+    return wrap;
+  };
+
+  function remittanceCard() {
+    const box = h("div", {}), results = h("div");
+    (async () => {
+      const st = await aiStatus();
+      if (!st || !st.enabled) { box.replaceChildren(h("p", { class: "sub", text: "Read a customer's remittance advice (PDF or photo) to see which invoices it pays and how much TDS was deducted. Switch on AI assist in Settings to use this." })); return; }
+      if (!st.sdk_present || !st.key_present) { box.replaceChildren(h("p", { class: "sub", text: "AI assist is on but not ready (add-on or API key missing). See Settings." })); return; }
+      box.replaceChildren(dropzone((file) => {
+        let result = null;
+        openModal({
+          title: "Send this document to the AI?", quiet: true, submit: "Send and read it",
+          intro: `The whole file "${file.name}" will be sent to Anthropic's Claude so it can be read. A remittance advice usually names the payer and shows amounts. Nothing else is sent, the file is not stored on disk here, and the request will appear in Activity.`,
+          fields: [],
+          onSubmit: async () => { result = await upload("/api/ai/remittance", file); showRemit(result); return "Document read. Check it against the original."; },
+        });
+      }, "Drop a remittance advice here", "A PDF or a PNG/JPEG photo, up to 5 MB. You are asked to confirm before it is sent."));
+    })();
+    function showRemit(r) {
+      const rows = r.matches.map((m) => {
+        const status = !m.found ? h("span", { class: "chip broken", text: m.ambiguous ? "Ambiguous" : "Not found" }) : (m.settles ? h("span", { class: "chip pending", text: "Pays it in full" }) : h("span", { class: "chip conf medium", text: "Check" }));
+        const actions = h("div", { class: "cellactions" });
+        if (m.found && writable()) {
+          actions.append(h("button", { type: "button", class: "btn small ghost", text: "Note it", onclick: () => CO.openFollowup(m.customer, { channel: "other", outcome: `Remittance received: net ${fmt(m.net)}${m.tds ? ", TDS " + fmt(m.tds) : ""}${r.reference ? " (ref " + r.reference + ")" : ""}`, note: `Remittance advice from ${r.payer} for ${m.invoice_no}` }) }));
+          if (m.settles) {
+            const btn = h("button", { type: "button", class: "btn small good", text: "Confirm paid in full" });
+            btn.addEventListener("click", () => openModal({
+              title: "Mark this invoice paid in full?", quiet: true, submit: "Yes, it was paid", intro: `${m.invoice_no} for ${m.customer}: ${fmt(m.net)} received plus ${fmt(m.tds || "0")} TDS equals the ${fmt(m.outstanding)} outstanding. Only confirm if you are satisfied the payment is real; this closes the invoice and is recorded in the log.`, fields: [],
+              onSubmit: async () => { await post("/api/invoice/settle", { items: [{ invoice_no: m.invoice_no, customer: m.customer }], note: `confirmed from remittance advice${r.reference ? " ref " + r.reference : ""}`, actor: actor() }); btn.replaceWith(h("span", { class: "chip pending", text: "Marked paid" })); return "Marked paid in full."; },
+            }));
+            actions.append(btn);
+          }
+        }
+        return [m.invoice_no, m.found ? custLink(m.customer) : "–", m.found ? fmt(m.outstanding) : "–", m.gross ? `${fmt(m.gross)} · TDS ${m.tds ? fmt(m.tds) : "–"} · net ${m.net ? fmt(m.net) : "–"}` : "–", h("div", {}, status, ...m.notes.map((t) => h("div", { class: "sub", text: t }))), actions];
+      });
+      results.replaceChildren(h("div", { class: "note", style: { margin: "16px 0" } },
+        h("div", {}, h("b", { text: r.payer || "Payer not shown" }), `  ${r.payment_date ? dmy(r.payment_date) : "date not shown"}${r.reference ? " · ref " + r.reference : ""}`),
+        h("div", { text: `Total received ${r.total_received ? fmt(r.total_received) : "not shown"}${r.total_tds ? " · TDS deducted " + fmt(r.total_tds) : ""} · ${r.confidence} confidence` }),
+        r.notes && r.notes.toLowerCase() !== "none" ? h("div", { class: "sub", text: r.notes }) : null, ...r.warnings.map((w) => h("div", { class: "sub", style: { color: "var(--warn)" }, text: w }))),
+        simpleTable(["Invoice", "Customer", "We show outstanding", "On the document", "Result", ""], rows, { right: [2] }) || h("div", { class: "empty", text: "No invoice numbers were found on the document." }),
+        h("p", { class: "sub", style: { "margin-top": "10px" }, text: "Read by AI and matched by invoice number. Nothing has been changed. Compare with the original document before you confirm anything." }));
+    }
+    return h("div", { class: "grid", style: { "margin-top": "20px" } }, card("c12", 2, h("h2", { text: "Read a remittance advice (AI, optional)", style: { "text-align": "left", "margin-bottom": "10px" } }), box, results));
+  }
+
   /* ---------- call sheet: a printable page for people away from the screen ---------- */
   CO.registerView("callsheet", "Call sheet", null, (d) => {
     const company = store.get("company", "");
@@ -515,6 +696,7 @@
       case "dispute.opened": return ["Dispute opened", categoryName(a.category)];
       case "dispute.resolved": return ["Dispute resolved", ""];
       case "customer.updated": return ["Customer details changed", Object.keys(a).filter((k) => k !== "customer" && a[k] !== b[k]).map((k) => k.replace(/_/g, " ")).join(", ")];
+      case "ai.request": return ["AI assist used", `${String(a.feature || "").replace(/_/g, " ")} · ${(a.input_tokens || 0) + (a.output_tokens || 0)} tokens · about $${a.cost_usd} · sent: ${String(a.sent || "").slice(0, 300)}${String(a.sent || "").length > 300 ? "…" : ""}`];
       case "setting.changed": return ["Setting changed", Object.keys(a).map((k) => `${k.replace(/_/g, " ")}: ${b[k]} → ${a[k]}`).join("; ")];
       default: return [e.action, ""];
     }

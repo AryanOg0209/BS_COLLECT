@@ -16,7 +16,7 @@ Codename only; not a registered brand. Status: early build, **not yet validated 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                                  # 450 tests
+.venv/bin/pytest                                  # 585 tests
 
 # Build the whole 10-minute demo kit from synthetic data
 .venv/bin/collectos demo ./demo-kit
@@ -64,6 +64,19 @@ external requests, imported text always rendered as text. Writes are a fixed lis
 token, a same-origin `Origin`, the right content type and a size cap; uploads sit in a private temp folder under random
 names and are deleted after use. `collectos ui --read-only` removes every write control. Respects "reduce motion".
 The MSME 45-day flag is informational only and needs your CA's confirmation before you rely on it.
+
+**Optional AI assist (off by default).** Three helpers that use the Claude API, only if you install the add-on
+(`pip install -e ".[ai]"`), put a key in a git-ignored `.env` as `ANTHROPIC_API_KEY=...` (`chmod 600 .env`) and
+switch it on in Settings. Without all three, nothing leaves the computer.
+- **Reply reader**: paste a customer's reply (English/Hindi/Hinglish) and it pre-fills the follow-up form (promise date/amount, dispute). A promise is only accepted if it quotes the customer's own words.
+- **Column helper**: for an export CollectOS does not recognise, only the column titles and masked sample cells are sent; or map the columns yourself with no AI at all.
+- **Remittance reader**: drop a payment-advice PDF/image; it reads invoice numbers, amounts and TDS, and you confirm each match.
+
+Safeguards: phone numbers, emails, PAN, GSTIN, UPI ids and long numbers are masked before sending; you see a
+confirmation of what is sent; the model's answer is treated as untrusted and re-validated; every request is written to
+the audit log with the exact text sent; a monthly spend cap (Settings) stops further calls. The default model is
+`claude-haiku-5-5` (cheap); set `COLLECTOS_AI_MODEL` to use another. `collectos ai-check` makes one tiny real call to
+verify the key, model and response format and prints the cost (never the key). Set `COLLECTOS_NO_DOTENV=1` to ignore `.env`.
 
 `collectos roi-sheet roi.xlsx` writes an editable ROI calculator (live formulas, illustrative defaults) to use with a prospect's own numbers.
 

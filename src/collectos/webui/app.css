@@ -471,3 +471,13 @@ dialog.modal.wide { width: min(780px, 96vw); }
 
 .cellactions .btn { white-space: nowrap; }
 table.matches td:last-child { white-space: nowrap; }
+
+/* ============================ optional AI assist + column mapping ============================ */
+.ai-assist { margin: 4px 0 16px; padding: 14px 16px 6px; border-radius: 16px; background: rgba(142, 99, 224, 0.08); border: 1px solid rgba(142, 99, 224, 0.28); }
+.ai-assist[hidden] { display: none; }
+.ai-assist .btn { margin: 4px 0 12px; }
+.sendlist { margin: 10px 0 14px; padding-left: 18px; color: var(--muted); font-size: 14px; line-height: 1.6; } .sendlist b { color: var(--text); }
+.mapgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 4px 18px; margin-top: 8px; }
+table.layoutgrid { font-size: 12.5px; } table.layoutgrid th, table.layoutgrid td { padding: 6px 10px; white-space: nowrap; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+table.layoutgrid tr.hdr td { background: rgba(224, 59, 217, 0.18); font-weight: 600; }
+details.why { margin: 4px 0 14px; color: var(--muted); } details.why summary { cursor: pointer; } pre.pre { white-space: pre-wrap; font: 12.5px/1.5 var(--font); background: rgba(0, 0, 0, 0.3); padding: 12px 14px; border-radius: 12px; }
