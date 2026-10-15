@@ -16,7 +16,7 @@ Codename only; not a registered brand. Status: early build, **not yet validated 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                                  # 231 tests
+.venv/bin/pytest                                  # 275 tests
 
 # Build the whole 10-minute demo kit from synthetic data
 .venv/bin/collectos demo ./demo-kit
@@ -43,10 +43,15 @@ collectos ui --db demo-kit/demo.db        # opens http://127.0.0.1:8765 in your 
 ![Dashboard on synthetic data](docs/dashboard.png)
 
 A dark, glass-style dashboard with true 3D bars, a layered 3D donut, a promise calendar, the explained work queue,
-reminder drafts, trend and an Excel report download. It is **read-only** and served from your computer only:
-bound to `127.0.0.1`, Host-header checked, strict Content-Security-Policy, no external fonts/scripts/requests, and
-imported text is always rendered as text, never HTML. Respects "reduce motion" (OS setting or Settings page).
-Actions (logging a follow-up, resolving a promise) still go through the CLI for now.
+reminder drafts, trend and an Excel report download. You can **log follow-ups** (with an optional promise to pay),
+**mark promises kept / broken / cancelled** and **take snapshots** from the screen; each goes through the same
+validation and audit log as the CLI. Use `collectos ui --read-only` to hide every write control (e.g. when sharing your screen).
+
+It is served from your computer only: bound to `127.0.0.1`, Host-header checked, strict Content-Security-Policy, no
+external fonts/scripts/requests, and imported text is always rendered as text, never HTML. The only writes are three
+small JSON POSTs, each requiring a per-run secret token header, a same-origin `Origin`, a JSON content type and a
+small body (so another website you visit cannot make your browser change your data). Respects "reduce motion"
+(OS setting or the Settings page). Importing a file is still done with `collectos import`.
 
 `collectos roi-sheet roi.xlsx` writes an editable ROI calculator (live formulas, illustrative defaults) to use with a prospect's own numbers.
 

@@ -77,10 +77,11 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--company", required=True)
     p.set_defaults(func=_cmd_report)
 
-    p = sub.add_parser("ui", help="open the read-only dashboard in your browser (served from this computer only)")
+    p = sub.add_parser("ui", help="open the dashboard in your browser (served from this computer only)")
     p.add_argument("--db", default=os.environ.get("COLLECTOS_DB", DEFAULT_DB))
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-open", action="store_true", help="do not open a browser window")
+    p.add_argument("--read-only", action="store_true", help="disable all buttons that change data (useful when showing the screen)")
     p.set_defaults(func=_cmd_ui)
 
     p = sub.add_parser("roi-sheet", help="write the customer ROI calculator workbook (editable assumptions, live formulas)")
@@ -177,7 +178,7 @@ def _cmd_report(args) -> int:
 
 
 def _cmd_ui(args) -> int:
-    web.serve(args.db, port=args.port, open_browser=not args.no_open)
+    web.serve(args.db, port=args.port, open_browser=not args.no_open, read_only=args.read_only)
     return 0
 
 

@@ -24,7 +24,7 @@
       <nav>
         <ul class="nav" id="nav"></ul>
       </nav>
-      <p class="side-note"><b>Read-only.</b> Served from this computer only. Nothing is sent anywhere.</p>
+      <p class="side-note" id="sideNote"><b>Local only.</b> Served from this computer. Nothing is sent anywhere.</p>
     </aside>
 
     <div class="main">
@@ -34,6 +34,7 @@
           <span class="icowrap" data-icon="search"></span>
           <div class="search-results glass" id="searchResults" role="listbox" aria-label="Search results"></div>
         </div>
+        <button class="btn topaction" id="logBtn" type="button" hidden><span class="icowrap" data-icon="plus"></span><span class="lbl">Log follow-up</span></button>
         <button class="pill asof" id="asofBtn" type="button" aria-label="Change the as-of date"><span class="icowrap" data-icon="calendar"></span><span><small>as of</small> <b id="asofLabel">…</b></span></button>
         <div class="topwrap">
           <button class="pill bell" id="bellBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Alerts"><span class="icowrap" data-icon="bell"></span><span class="count" id="bellCount" hidden>0</span></button>
@@ -46,6 +47,7 @@
     </div>
   </div>
 
+  <dialog id="modal" class="modal glass" aria-labelledby="modalTitle"></dialog>
   <div id="tooltip" role="tooltip"></div>
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="/static/app.js" defer></script>

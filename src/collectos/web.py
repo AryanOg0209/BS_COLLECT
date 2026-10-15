@@ -1,16 +1,20 @@
-"""Local, read-only dashboard server.
+"""Local dashboard server.
 
 Safety properties (each is covered by a test):
 - binds to the loopback interface only, never to the network;
 - rejects requests whose Host header is not this server (blocks DNS-rebinding);
 - no CORS headers, a strict Content-Security-Policy, and nothing loaded from other origins;
-- only GET/HEAD: it cannot change the database;
-- static files are served from one fixed directory with no path traversal.
+- reads are plain GETs. The only writes are three small JSON POSTs (log a follow-up, resolve a
+  promise, take a snapshot). Each needs a per-run secret token in a custom header (which a
+  cross-site page cannot send without a CORS preflight we never grant), a same-origin Origin
+  header, a JSON content type and a small body. `read_only=True` disables writes entirely;
+- static files come from a fixed allow-list, so there is no path traversal.
 All text shown in the page comes from imported files and is untrusted: the client renders
 it with textContent only, never as HTML.
 """
 
 import json
+import secrets
 import tempfile
 import threading
 import webbrowser
@@ -22,9 +26,10 @@ from urllib.parse import parse_qs, urlparse
 
 from .ageing import CURRENT, DEFAULT_EDGES, NO_DUE_DATE, Status, assess, bucket_labels, summarise_by_customer
 from .dates import DateError, parse_date
+from .money import MoneyError, to_money
 from .reminders import Sender, draft_for_customer
 from .report import write_owner_report
-from .store import Store
+from .store import Store, StoreError
 from .workqueue import build_queue
 
 WEB_DIR = Path(__file__).parent / "webui"
@@ -33,6 +38,9 @@ STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.css": "text/css; 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 _ZERO = Decimal("0.00")
+WRITE_ROUTES = {"/api/followup", "/api/promise/resolve", "/api/snapshot"}
+MAX_BODY = 64 * 1024
+TOKEN_HEADER = "X-CollectOS-Token"
 
 
 def _m(value: Decimal | None) -> str | None:
@@ -152,6 +160,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._static("index.html")
             if url.path.startswith("/static/"):
                 return self._static(url.path.removeprefix("/static/"))
+            if url.path == "/api/session":
+                return self._json(200, {"token": self.server.token, "writable": not self.server.read_only})
             if url.path == "/api/overview":
                 return self._overview(query)
             if url.path == "/api/draft":
@@ -167,9 +177,70 @@ class _Handler(BaseHTTPRequestHandler):
     do_HEAD = do_GET  # noqa: N815
 
     def _method_not_allowed(self):
-        self._send(405, b'{"error": "read-only server"}', "application/json; charset=utf-8", {"Allow": "GET, HEAD"})
+        self._send(405, b'{"error": "method not allowed"}', "application/json; charset=utf-8", {"Allow": "GET, HEAD"})
 
-    do_POST = do_PUT = do_DELETE = do_PATCH = _method_not_allowed  # noqa: N815
+    do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _method_not_allowed  # noqa: N815
+
+    def do_POST(self):  # noqa: N802
+        path = urlparse(self.path).path
+        if path not in WRITE_ROUTES:
+            return self._method_not_allowed()
+        self.close_connection = True  # never leave an unread request body on a kept-alive connection
+        if self.server.read_only:
+            return self._error(405, "this dashboard is running in read-only mode")
+        if self.headers.get("Host", "") not in self.server.allowed_hosts:
+            return self._error(403, "unexpected Host header")
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in {f"http://{h}" for h in self.server.allowed_hosts}:
+            return self._error(403, "cross-origin request refused")
+        supplied = self.headers.get(TOKEN_HEADER, "")
+        if not secrets.compare_digest(supplied.encode(), self.server.token.encode()):
+            return self._error(403, "missing or wrong session token; reload the page")
+        if not (self.headers.get("Content-Type", "").split(";")[0].strip().lower() == "application/json"):
+            return self._error(415, "send JSON")
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self._error(411, "Content-Length required")
+        if not 0 <= length <= MAX_BODY:
+            return self._error(413, f"body must be at most {MAX_BODY} bytes")
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("body must be a JSON object")
+            handler = {"/api/followup": self._post_followup, "/api/promise/resolve": self._post_resolve,
+                       "/api/snapshot": self._post_snapshot}[path]
+            self._json(200, handler(body))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._error(400, "body is not valid JSON")
+        except (StoreError, DateError, MoneyError, ValueError, KeyError, TypeError) as exc:
+            self._error(400, f"missing field {exc}" if isinstance(exc, KeyError) else str(exc))
+
+    # -- write handlers (each validates through the same Store rules as the CLI) ------
+    def _post_followup(self, body: dict) -> dict:
+        promise_date = parse_date(body["promise_date"]) if _text(body, "promise_date") else None
+        amount = to_money(_text(body, "promise_amount")) if _text(body, "promise_amount") else None
+        with Store(self.server.db_path) as store:
+            followup_id, promise_id = store.log_followup(
+                _text(body, "customer", required=True), _text(body, "channel", required=True),
+                _text(body, "outcome", required=True), actor=_actor(body), note=_text(body, "note"),
+                promise_date=promise_date, promise_amount=amount)
+        return {"followup_id": followup_id, "promise_id": promise_id}
+
+    def _post_resolve(self, body: dict) -> dict:
+        promise_id = body["id"]
+        if not isinstance(promise_id, int) or isinstance(promise_id, bool):
+            raise ValueError("id must be a whole number")
+        with Store(self.server.db_path) as store:
+            store.resolve_promise(promise_id, _text(body, "status", required=True), actor=_actor(body), note=_text(body, "note"))
+        return {"ok": True}
+
+    def _post_snapshot(self, body: dict) -> dict:
+        as_of = parse_date(_text(body, "as_of")) if _text(body, "as_of") else date.today()
+        with Store(self.server.db_path) as store:
+            snap = store.take_snapshot(as_of, actor=_actor(body))
+        return {"id": snap.id, "as_of": snap.as_of.isoformat(), "overdue": _m(snap.overdue),
+                "payments_observed": _m(snap.payments_observed)}
 
     # -- handlers --------------------------------------------------------------
     def _static(self, name: str) -> None:
@@ -211,12 +282,32 @@ class _Handler(BaseHTTPRequestHandler):
                    {"Content-Disposition": f'attachment; filename="owner-report-{as_of.isoformat()}.xlsx"'})
 
 
+def _text(body: dict, key: str, required: bool = False, limit: int = 2000) -> str:
+    value = body.get(key)
+    if value is None or value == "":
+        if required:
+            raise ValueError(f"{key} is required")
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be text")
+    value = value.strip()
+    if len(value) > limit:  # refuse rather than silently cut a record short
+        raise ValueError(f"{key} is too long (at most {limit} characters)")
+    return value
+
+
+def _actor(body: dict) -> str:
+    return _text(body, "actor", limit=60) or "dashboard"
+
+
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, db_path: str | Path, port: int = 0):
+    def __init__(self, db_path: str | Path, port: int = 0, read_only: bool = False):
         super().__init__(("127.0.0.1", port), _Handler)  # loopback only
         self.db_path = str(db_path)
+        self.read_only = read_only
+        self.token = secrets.token_urlsafe(32)  # new on every start; never written to disk
         actual = self.server_address[1]
         self.allowed_hosts = {f"127.0.0.1:{actual}", f"localhost:{actual}"}
 
@@ -225,15 +316,16 @@ class DashboardServer(ThreadingHTTPServer):
         return f"http://127.0.0.1:{self.server_address[1]}/"
 
 
-def make_server(db_path: str | Path, port: int = 0) -> DashboardServer:
+def make_server(db_path: str | Path, port: int = 0, read_only: bool = False) -> DashboardServer:
     if not Path(db_path).is_file():
         raise FileNotFoundError(f"database not found: {db_path} (import data first, or build one with `collectos demo`)")
-    return DashboardServer(db_path, port)
+    return DashboardServer(db_path, port, read_only)
 
 
-def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True) -> None:
-    server = make_server(db_path, port)
-    print(f"CollectOS dashboard: {server.url}  (read-only, this computer only; Ctrl+C to stop)")
+def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True, read_only: bool = False) -> None:
+    server = make_server(db_path, port, read_only)
+    mode = "read-only" if read_only else "can record follow-ups"
+    print(f"CollectOS dashboard: {server.url}  ({mode}; this computer only; Ctrl+C to stop)")
     if open_browser:
         threading.Timer(0.4, webbrowser.open, args=(server.url,)).start()
     try:

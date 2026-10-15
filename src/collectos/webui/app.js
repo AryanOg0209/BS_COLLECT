@@ -56,6 +56,7 @@
     copy: ["M9 9h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1z", "M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"],
     alert: ["M12 4l9 16H3z", "M12 10v4", "M12 17.5v.5"],
     phone: ["M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v3a2 2 0 0 1-2 2A15 15 0 0 1 3 6a2 2 0 0 1 2-2z"],
+    plus: ["M12 5v14", "M5 12h14"],
     money: ["M3 7h18v10H3z", "M12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z", "M6 10v4", "M18 10v4"],
   };
   function icon(name, cls = "ico") {
@@ -96,7 +97,7 @@
 
   /* ---------- state ---------- */
   const state = {
-    data: null, view: "dashboard", asOf: new URLSearchParams(location.search).get("as_of") || "",
+    data: null, session: { token: "", writable: false }, view: "dashboard", asOf: new URLSearchParams(location.search).get("as_of") || "",
     chartMode: "age", calYM: null, calSel: null, filter: "", remindFor: null, trendMetric: "overdue",
   };
   const NAV = [
@@ -282,7 +283,7 @@
         ? sel.map((p) => h("li", {}, h("span", { text: p.customer }), h("span", { class: "chip " + (p.state === "broken" ? "broken" : "pending"), text: p.state === "broken" ? "Broken" : "Pending" })))
         : (state.calSel ? [h("li", { class: "sub", text: "No promises on " + dmy(state.calSel) })] : []));
       const legend = h("div", { class: "legend-cal" }, h("span", {}, h("i", { style: { background: "var(--teal)" } }), "Pending"), h("span", {}, h("i", { style: { background: "var(--warn)" } }), "Broken (date passed)"));
-      box.replaceChildren(head, grid, list, big ? null : legend);
+      box.replaceChildren(...[head, grid, list, big ? null : legend].filter(Boolean));
     };
     render();
     return box;
@@ -300,6 +301,9 @@
       const cells = [
         slim ? null : h("td", { class: "num", text: String(i + 1) }),
         h("td", {}, h("div", { text: r.customer }), expandable ? reasons : null,
+          expandable ? h("div", { class: "rowactions" },
+            writable() ? h("button", { type: "button", class: "btn small", onclick: (e) => { e.stopPropagation(); openFollowup(r.customer); } }, icon("phone"), "Log follow-up") : null,
+            h("button", { type: "button", class: "btn small ghost", onclick: (e) => { e.stopPropagation(); state.remindFor = r.customer; go("reminders"); } }, icon("reminders"), "Draft reminder")) : null,
           slim && r.broken_promise_dates.length ? h("span", { class: "chip broken", style: { "margin-top": "4px" }, text: "Broken promise" }) : null),
         h("td", {}, h("span", { class: "chip " + (r.action === "Call" ? "call" : "remind"), text: r.action })),
         slim ? null : h("td", {}, h("span", { class: "scorebar" }, h("i", { style: { "--w": (r.score / maxScore) * 100 + "%" } })), h("span", { class: "num", text: String(r.score) })),
@@ -319,6 +323,80 @@
     const right = new Set(slim ? ["Overdue", "Oldest"] : ["Overdue", "Oldest", "Contact"]);
     const head = h("tr", {}, cols.map((t) => h("th", { scope: "col", class: right.has(t) ? "r" : "", text: t })));
     return h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, head), body));
+  }
+
+  /* ---------- actions: guarded writes through a modal ---------- */
+  const writable = () => state.session.writable;
+  const actor = () => store.get("sender", "") || "dashboard";
+  async function post(path, body) {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-CollectOS-Token": state.session.token }, body: JSON.stringify(body) });
+    let j = {}; try { j = await r.json(); } catch { /* non-JSON error body */ }
+    if (!r.ok) throw new Error(j.error || `request failed (${r.status})`);
+    return j;
+  }
+  const dlg = $("#modal");
+  dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+  function openModal({ title, intro, fields, submit, onSubmit, danger = false }) {
+    const err = h("div", { class: "form-error", role: "alert", hidden: true });
+    const go = h("button", { type: "submit", class: "btn" + (danger ? " bad" : ""), text: submit });
+    const form = h("form", { novalidate: true }, h("h2", { id: "modalTitle", text: title }), intro ? h("p", { class: "sub", text: intro }) : null, fields, err,
+      h("div", { class: "modal-actions" }, h("button", { type: "button", class: "btn ghost", text: "Cancel", onclick: () => dlg.close() }), go));
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault(); err.hidden = true; go.disabled = true;
+      try { const msg = await onSubmit(new FormData(form)); dlg.close(); toast(msg || "Saved"); await load(); }
+      catch (ex) { err.textContent = ex.message; err.hidden = false; go.disabled = false; }
+    });
+    dlg.replaceChildren(h("div", { class: "modal-inner" }, form));
+    dlg.showModal();
+    const first = $("input:not([type=hidden]), select, textarea", form); if (first && !first.value) first.focus();
+  }
+  const field = (label, control, hint) => h("div", { class: "field" }, h("label", { for: control.id, text: label }), control, hint ? h("span", { class: "hint", text: hint }) : null);
+
+  function openFollowup(customer = "") {
+    if (!writable()) return;
+    const names = (state.data ? state.data.customers : []).map((c) => c.customer);
+    const cust = h("input", { id: "f-cust", name: "customer", list: "f-cust-list", value: customer, placeholder: "Start typing a customer name", autocomplete: "off", required: true });
+    const channel = h("select", { id: "f-chan", name: "channel" }, ...["call", "whatsapp", "email", "visit", "other"].map((c) => h("option", { value: c, text: c[0].toUpperCase() + c.slice(1) })));
+    const outcome = h("input", { id: "f-out", name: "outcome", placeholder: "e.g. Said he will pay on Friday", required: true });
+    const note = h("textarea", { id: "f-note", name: "note", placeholder: "Optional details" });
+    const promised = h("input", { type: "checkbox", id: "f-prom" });
+    const date = h("input", { type: "date", id: "f-date", name: "promise_date", min: todayISO() });
+    const amount = h("input", { id: "f-amt", name: "promise_amount", placeholder: "Optional, e.g. 50,000", inputmode: "decimal" });
+    const box = h("div", { class: "promise-box", hidden: true }, field("Promised date", date), field("Promised amount (₹)", amount));
+    promised.addEventListener("change", () => { box.hidden = !promised.checked; if (promised.checked) date.focus(); });
+    openModal({
+      title: "Log a follow-up", intro: "Record what happened on this contact. If the customer promised a date, note it so it can be tracked.",
+      fields: [h("datalist", { id: "f-cust-list" }, names.map((n) => h("option", { value: n }))), field("Customer", cust), field("How did you contact them?", channel), field("What happened?", outcome), field("Notes", note),
+        h("label", { class: "checkrow" }, promised, h("span", { text: "They promised to pay by a date" })), box],
+      submit: "Save follow-up",
+      onSubmit: async () => {
+        if (promised.checked && !date.value) throw new Error("Choose the date they promised to pay by.");
+        const body = { customer: cust.value, channel: channel.value, outcome: outcome.value, note: note.value, actor: actor() };
+        if (promised.checked) { body.promise_date = date.value; if (amount.value.trim()) body.promise_amount = amount.value; }
+        const j = await post("/api/followup", body);
+        return j.promise_id ? `Follow-up saved. Promise recorded for ${dmy(date.value)}.` : "Follow-up saved.";
+      },
+    });
+  }
+  function openResolve(p, status) {
+    if (!writable()) return;
+    const note = h("textarea", { id: "r-note", name: "note", placeholder: "Optional, e.g. NEFT received on 14th" });
+    const word = { kept: "kept", broken: "broken", cancelled: "cancelled" }[status];
+    openModal({
+      title: `Mark promise as ${word}?`, danger: status !== "kept",
+      intro: `${p.customer} promised to pay by ${dmy(p.date)}${p.amount ? " (" + fmt(p.amount) + ")" : ""}. This closes the promise and cannot be undone; the change is recorded in the audit log.`,
+      fields: [field("Note", note)], submit: `Mark ${word}`,
+      onSubmit: async () => { await post("/api/promise/resolve", { id: p.id, status, note: note.value, actor: actor() }); return `Promise marked ${word}.`; },
+    });
+  }
+  function openSnapshot() {
+    if (!writable()) return;
+    const d = state.data;
+    openModal({
+      title: "Take a snapshot", intro: `Record today's measures as of ${dmy(d.as_of)} so they can be compared week by week. Snapshots are permanent; taking another for the same date supersedes it without deleting history.`,
+      fields: [], submit: "Take snapshot",
+      onSubmit: async () => { const j = await post("/api/snapshot", { as_of: d.as_of, actor: actor() }); return `Snapshot saved. Payments seen since the last one: ${fmt(j.payments_observed)}.`; },
+    });
   }
 
   /* ---------- views ---------- */
@@ -434,11 +512,16 @@
 
   function viewPromises(d) {
     const rows = d.promises.map((p) => h("tr", {}, h("td", { text: p.customer }), h("td", { class: "num", text: dmy(p.date) }), h("td", { class: "r num", text: p.amount ? fmt(p.amount) : "–" }),
-      h("td", {}, h("span", { class: "chip " + (p.state === "broken" ? "broken" : "pending"), text: p.state === "broken" ? "Broken (date passed)" : "Pending" }))));
-    const list = d.promises.length ? h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Customer", "Promised date", "Amount", "State"].map((t, i) => h("th", { scope: "col", class: i === 2 ? "r" : "", text: t })))), h("tbody", {}, rows)))
-      : h("div", { class: "empty", text: "No open promises. When a customer promises a date, record it with `collectos log … --promise-date`." });
+      h("td", {}, h("span", { class: "chip " + (p.state === "broken" ? "broken" : "pending"), text: p.state === "broken" ? "Broken" : "Pending", title: p.state === "broken" ? "The promised date has passed and it was not marked kept" : "The promised date has not arrived yet" })),
+      writable() ? h("td", { class: "r" }, h("div", { class: "cellactions" },
+        h("button", { type: "button", class: "btn small good", "aria-label": `Mark ${p.customer} promise kept`, text: "Kept", onclick: () => openResolve(p, "kept") }),
+        h("button", { type: "button", class: "btn small bad", "aria-label": `Mark ${p.customer} promise broken`, text: "Broken", onclick: () => openResolve(p, "broken") }),
+        h("button", { type: "button", class: "btn small ghost", "aria-label": `Cancel ${p.customer} promise`, text: "Cancel", onclick: () => openResolve(p, "cancelled") }))) : null));
+    const heads = ["Customer", "Promised date", "Amount", "State", ...(writable() ? [""] : [])];
+    const list = d.promises.length ? h("div", { class: "tablewrap" }, h("table", { class: "promises" }, h("thead", {}, h("tr", {}, heads.map((t, i) => h("th", { scope: "col", class: i === 2 || i === 4 ? "r" : "", text: t || "Actions" })))), h("tbody", {}, rows)))
+      : h("div", { class: "empty", text: writable() ? "No open promises. When a customer promises a date, use “Log follow-up” and tick “They promised to pay by a date”." : "No open promises." });
     return h("div", {}, viewHead("Promises", "Every open promise to pay. A promise turns 'broken' the day after its date if it isn't marked kept."),
-      h("div", { class: "grid" }, h("section", { class: "card glass reveal c5 r-c12", style: { "--i": 0 } }, calendar(d.promises, true)), h("section", { class: "card glass reveal c7 r-c12", style: { "--i": 1 } }, list)));
+      h("div", { class: "grid" }, h("section", { class: "card glass reveal c4 r-c12", style: { "--i": 0 } }, calendar(d.promises, true)), h("section", { class: "card glass reveal c8 r-c12", style: { "--i": 1 } }, list)));
   }
 
   function viewReminders(d) {
@@ -457,7 +540,7 @@
         const block = (title, text) => h("div", { style: { "margin-bottom": "18px" } },
           h("div", { class: "card-head" }, h("h2", { text: title, style: { "font-size": "16px" } }), h("button", { type: "button", class: "btn ghost", onclick: () => copy(text) }, icon("copy"), "Copy")),
           h("div", { class: "draft", text }));
-        out.replaceChildren(h("div", { style: { "margin-bottom": "14px" } }, h("span", { class: "chip " + (j.template === "promise_followup" ? "broken" : j.template === "firm" ? "call" : "remind"), text: j.template.replace("_", " ") }),
+        out.replaceChildren(h("div", { style: { "margin-bottom": "14px" } }, writable() ? h("button", { type: "button", class: "btn small", style: { "margin-right": "12px" }, onclick: () => openFollowup(state.remindFor) }, icon("phone"), "Log follow-up") : null, h("span", { class: "chip " + (j.template === "promise_followup" ? "broken" : j.template === "firm" ? "call" : "remind"), text: j.template.replace("_", " ") }),
           h("span", { class: "sub", text: "  Draft only. Read it, then send it yourself. Nothing is sent from here." })),
           block("Email: " + j.subject, j.email), block("WhatsApp", j.whatsapp));
       } catch (e) { out.replaceChildren(h("div", { class: "banner", text: "Could not build the draft: " + e.message })); }
@@ -480,7 +563,7 @@
       h("td", { class: "r num", text: fmt(s.over60) }), h("td", { class: "r num", text: fmt(s.over90) }), h("td", { class: "r num", text: String(s.followups_7d) }), h("td", { class: "r num", text: String(s.broken_promises) }), h("td", { class: "r num", text: fmt(s.payments_observed) })));
     const table = d.trend.length ? h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["As of", "Outstanding", "Overdue", "Over 60d", "Over 90d", "Follow-ups (7d)", "Broken", "Payments seen"].map((t, i) => h("th", { scope: "col", class: i ? "r" : "", text: t })))), h("tbody", {}, rows))) : null;
     return h("div", {}, viewHead("Trend", "Weekly snapshots, recorded the same way every time."),
-      h("div", { class: "grid" }, h("section", { class: "card glass reveal c12", style: { "--i": 0 } }, h("div", { class: "card-head" }, h("h2", { text: "Week by week" }), sel), host),
+      h("div", { class: "grid" }, h("section", { class: "card glass reveal c12", style: { "--i": 0 } }, h("div", { class: "card-head" }, h("h2", { text: "Week by week" }), h("div", { style: { display: "flex", gap: "10px", "align-items": "center" } }, writable() ? h("button", { type: "button", class: "btn small", onclick: openSnapshot }, icon("trend"), "Take snapshot now") : null, sel)), host),
         d.trend.length ? h("section", { class: "card glass reveal c12", style: { "--i": 1 } }, table, h("p", { class: "sub", style: { "margin-top": "14px" }, text: "These numbers describe what the data showed. They do not prove that any change was caused by follow-up work. 'Payments seen' counts only increases in paid amounts that arrived through imports." })) : null));
   }
 
@@ -500,7 +583,9 @@
         } }),
         h("div", { class: "field", style: { "margin-top": "22px" } }, h("label", { for: "set-rm" }, rm, " Reduce motion (turns off 3D movement and animation)"))),
       h("section", { class: "card glass reveal c6 r-c12", style: { "--i": 1 } }, h("h2", { text: "About your data", style: { "text-align": "left", "margin-bottom": "16px" } }),
-        h("div", { class: "note", text: "This page is read-only and is served from this computer only. Nothing you see here is uploaded, and no message is sent to any customer." }),
+        h("div", { class: "note", text: state.session.writable
+          ? "This page is served from this computer only. The only changes it can make are the ones you save (follow-ups, promise outcomes, snapshots); they go into your local database and audit log. Nothing is uploaded, and no message is ever sent to a customer."
+          : "This dashboard is running in read-only mode and is served from this computer only. Nothing is uploaded, and no message is sent to any customer." }),
         h("p", { class: "sub", text: `Database: ${d.db_name}` }),
         h("p", { class: "sub", text: "Figures describe the data supplied. They are not accounting, tax or legal advice and do not predict or guarantee collections." }))));
   }
@@ -561,6 +646,7 @@
     const collapsed = store.get("collapsed", "0") === "1"; app.dataset.collapsed = String(collapsed); cb.setAttribute("aria-pressed", String(collapsed));
     cb.addEventListener("click", () => { const c = app.dataset.collapsed !== "true"; app.dataset.collapsed = String(c); cb.setAttribute("aria-pressed", String(c)); cb.setAttribute("aria-label", c ? "Expand sidebar" : "Collapse sidebar"); store.set("collapsed", c ? "1" : "0"); });
     $("#asofBtn").addEventListener("click", () => go("settings"));
+    $("#logBtn").addEventListener("click", () => openFollowup());
     const bell = $("#bellBtn"), menu = $("#bellMenu");
     bell.addEventListener("click", (e) => { e.stopPropagation(); const o = menu.classList.toggle("open"); bell.setAttribute("aria-expanded", String(o)); });
     document.addEventListener("click", (e) => { if (!menu.contains(e.target)) { menu.classList.remove("open"); bell.setAttribute("aria-expanded", "false"); } if (!e.target.closest(".search")) $("#searchResults").classList.remove("open"); });
@@ -577,7 +663,15 @@
     window.addEventListener("hashchange", render);
   }
 
+  async function startSession() {
+    try { const r = await fetch("/api/session"); if (r.ok) state.session = await r.json(); } catch { /* stay read-only if the session cannot be read */ }
+    $("#logBtn").hidden = !state.session.writable;
+    $("#sideNote").replaceChildren(h("b", { text: state.session.writable ? "Local only." : "Read-only." }),
+      state.session.writable ? " Changes you save stay in the database on this computer. Nothing is sent anywhere." : " Served from this computer. Nothing is sent anywhere.");
+    if (state.data) render();
+  }
+
   buildNav();
   $$("[data-icon]").forEach((s) => s.replaceChildren(icon(s.dataset.icon)));
-  applyMotion(); updateAvatar(); wire(); render(); load();
+  applyMotion(); updateAvatar(); wire(); render(); startSession(); load();
 })();
