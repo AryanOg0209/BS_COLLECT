@@ -16,7 +16,7 @@ Codename only; not a registered brand. Status: early build, **not yet validated 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                                  # 275 tests
+.venv/bin/pytest                                  # 450 tests
 
 # Build the whole 10-minute demo kit from synthetic data
 .venv/bin/collectos demo ./demo-kit
@@ -38,20 +38,32 @@ collectos report owner.xlsx --company "Sharma Steel" --db data/acme.db   # adds 
 
 ### Dashboard
 ```bash
-collectos ui --db demo-kit/demo.db        # opens http://127.0.0.1:8765 in your browser
+collectos demo ./showcase-kit                    # a complete synthetic dataset, incl. contacts, limits and a dispute
+collectos ui --db showcase-kit/demo.db           # opens http://127.0.0.1:8765
 ```
 ![Dashboard on synthetic data](docs/dashboard.png)
 
-A dark, glass-style dashboard with true 3D bars, a layered 3D donut, a promise calendar, the explained work queue,
-reminder drafts, trend and an Excel report download. You can **log follow-ups** (with an optional promise to pay),
-**mark promises kept / broken / cancelled** and **take snapshots** from the screen; each goes through the same
-validation and audit log as the CLI. Use `collectos ui --read-only` to hide every write control (e.g. when sharing your screen).
+**What it does that a reminder app does not**
 
-It is served from your computer only: bound to `127.0.0.1`, Host-header checked, strict Content-Security-Policy, no
-external fonts/scripts/requests, and imported text is always rendered as text, never HTML. The only writes are three
-small JSON POSTs, each requiring a per-run secret token header, a same-origin `Origin`, a JSON content type and a
-small body (so another website you visit cannot make your browser change your data). Respects "reduce motion"
-(OS setting or the Settings page). Importing a file is still done with `collectos import`.
+| Problem | What the portal does |
+|---|---|
+| "Is my data right?" (the usual complaint about sync tools) | **Import with a preview.** Drop a CSV/Excel export, see exactly what is new, changed and unchanged, which rows have problems, and how much was paid since last time, *before* anything is saved. Works on the file you already export; nothing to connect. |
+| Invoices vanish from an export | They are listed as "may be paid" and only closed when **you confirm** they were paid in full. Nothing is guessed. Confirmed settlements count as payments seen. |
+| Who do I call first, and why? | A work queue where every point of the score is a readable reason. Plus an **escalation ladder** (friendly reminder, firm follow-up, owner call, review credit terms) that says which rung and why. |
+| "I'll pay Friday" is forgotten | **Promise tracking** with a per-customer record (kept X of Y). Payments arriving after a promise raise a "looks kept" suggestion for you to confirm. |
+| Chasing someone who disputes the invoice | **Disputes** keep an invoice out of the chase list, with a category, owner and resolution, but in the totals. |
+| WhatsApp is how India collects, but the API costs money | One click opens **your own WhatsApp / mail / phone app** with a drafted message (English or Hinglish) you can edit. You press send, then log it with one click. Nothing is sent by CollectOS. |
+| Credit control | Per-customer credit limits, exposure vs limit, a credit-watch list, do-not-contact flags. |
+| Did a customer pay? | Upload a bank statement: credits are matched to customers/invoices **as suggestions with reasons** (invoice number, name, exact amount, possible TDS shortfall). It never changes a balance. |
+| Away from the screen | A printable **call sheet** with blank columns for what they said. |
+| "What changed, and who did it?" | An **activity** feed over an append-only audit log, plus a one-click backup of the whole database. |
+| Did it help? | Day-1 baseline and weekly snapshots, shown as a trend. Descriptive only, never claimed as causation. |
+
+Served from your computer only: bound to `127.0.0.1`, Host-header checked, strict Content-Security-Policy, no
+external requests, imported text always rendered as text. Writes are a fixed list of POSTs that need a per-run secret
+token, a same-origin `Origin`, the right content type and a size cap; uploads sit in a private temp folder under random
+names and are deleted after use. `collectos ui --read-only` removes every write control. Respects "reduce motion".
+The MSME 45-day flag is informational only and needs your CA's confirmation before you rely on it.
 
 `collectos roi-sheet roi.xlsx` writes an editable ROI calculator (live formulas, illustrative defaults) to use with a prospect's own numbers.
 
