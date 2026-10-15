@@ -121,7 +121,7 @@ def test_outstanding_greater_than_amount_is_an_error(tmp_path):
 
 
 def test_wrong_columns_give_a_helpful_file_error(tmp_path):
-    with pytest.raises(ImportFileError, match="could not find a header row"):
+    with pytest.raises(ImportFileError, match="could not find an invoice table"):
         import_invoices(write_csv(tmp_path, "foo,bar\n1,2\n"))
 
 
@@ -214,3 +214,78 @@ def test_misnamed_xlsx_files_give_clear_errors(tmp_path, build, expect):
     path = build(tmp_path / "export.xlsx")
     with pytest.raises(UnsupportedFile, match=expect):
         import_invoices(path)
+
+
+# ---- multi-sheet workbooks ---------------------------------------------------------
+
+INVOICE_HEADER = ["Invoice No", "Customer", "Invoice Date", "Due Date", "Amount", "Paid"]
+
+
+def _workbook(tmp_path, sheets, name="multi.xlsx"):
+    wb = Workbook()
+    wb.remove(wb.active)
+    for title, rows in sheets:
+        ws = wb.create_sheet(title)
+        for row in rows:
+            ws.append(row)
+    path = tmp_path / name
+    wb.save(path)
+    return path
+
+
+def test_invoice_table_is_found_on_a_later_sheet(tmp_path):
+    # e.g. Numbers adds an empty "Export Summary" sheet first.
+    path = _workbook(tmp_path, [
+        ("Export Summary", [[None], ["Table 1"]]),
+        ("Notes", [["just text"]]),
+        ("Invoices", [INVOICE_HEADER, ["A1", "Acme", "01-09-2026", "01-10-2026", 100, 0]]),
+    ])
+    report = import_invoices(path)
+    assert report.ok and report.sheet == "Invoices" and len(report.invoices) == 1
+
+
+def test_csv_reports_no_sheet(tmp_path):
+    assert import_invoices(write_csv(tmp_path, HEADER + "A1,Acme,01-09-2026,01-10-2026,100,0\n")).sheet is None
+
+
+def test_first_matching_sheet_wins_and_the_others_are_mentioned(tmp_path):
+    row = ["A1", "Acme", "01-09-2026", "01-10-2026", 100, 0]
+    path = _workbook(tmp_path, [("Jan", [INVOICE_HEADER, row]), ("Feb", [INVOICE_HEADER, row])])
+    report = import_invoices(path)
+    assert report.sheet == "Jan"
+    assert any("also found in sheet(s) 'Feb'" in w for w in report.warnings)
+
+
+def test_no_table_message_lists_every_sheet_and_what_is_missing(tmp_path):
+    path = _workbook(tmp_path, [
+        ("Cover", [["Quarterly pack"]]),
+        ("Bills", [["Party's Name", "Date", "Pending Amount"], ["Acme", "01-09-2026", 100]]),  # no invoice number
+    ])
+    with pytest.raises(ImportFileError) as exc:
+        import_invoices(path)
+    text = str(exc.value)
+    assert "sheet 'Cover': no recognisable invoice columns" in text
+    assert "sheet 'Bills': recognised ['customer', 'invoice_date', 'outstanding']; missing ['invoice_no']" in text
+    assert "Party's Name" in text          # column titles are shown so the user can see what was found
+    assert "Acme" not in text.split("Accepted header names")[0].split("column titles")[1]  # but never data rows
+
+
+def test_ambiguous_columns_name_the_sheet(tmp_path):
+    path = _workbook(tmp_path, [("S", [["Invoice No", "Customer", "Invoice Date", "Amount", "Total"], ["A1", "Acme", "01-09-2026", 1, 1]])])
+    with pytest.raises(ImportFileError, match="sheet 'S': ambiguous"):
+        import_invoices(path)
+
+
+def test_our_own_report_is_not_silently_misread_as_input(tmp_path):
+    """The mistake that prompted this: feeding the owner report back in as an invoice file."""
+    from datetime import date as _d
+
+    from collectos.models import Invoice
+    from collectos.report import write_owner_report
+    from collectos.workqueue import build_queue
+
+    inv = Invoice("A1", "Acme", _d(2025, 1, 1), _d(2026, 9, 1), Decimal("100"), Decimal("0"))
+    path = write_owner_report(tmp_path / "r.xlsx", company="X", as_of=_d(2026, 10, 15), invoices=[inv],
+                              queue=build_queue([inv], _d(2026, 10, 15), {}, []))
+    report = import_invoices(path)
+    assert report.sheet == "Open Invoices"  # the sheet is named, so the user can see what was read

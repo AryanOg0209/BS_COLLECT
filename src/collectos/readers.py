@@ -8,17 +8,20 @@ from openpyxl import load_workbook
 
 # Each row is (1-based row number in the source file, list of cell values).
 RawRows = list[tuple[int, list[object]]]
+# A sheet is (sheet name, rows). CSV files have a single sheet whose name is None.
+Sheet = tuple[str | None, RawRows]
 
 
 class UnsupportedFile(ValueError):
     pass
 
 
-def read_rows(path: str | Path) -> RawRows:
+def read_sheets(path: str | Path) -> list[Sheet]:
+    """Read every sheet of a CSV/XLSX file as raw rows. No interpretation here."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".csv":
-        return _read_csv(path)
+        return [(None, _read_csv(path))]
     if suffix in (".xlsx", ".xlsm"):
         return _read_xlsx(path)
     raise UnsupportedFile(f"unsupported file type {suffix!r}; use .csv or .xlsx (save .xls as .xlsx)")
@@ -51,11 +54,13 @@ def _check_xlsx(path: Path) -> None:
         raise UnsupportedFile(f"{path.name} is a zip file but not an Excel workbook; export it as .xlsx or .csv")
 
 
-def _read_xlsx(path: Path) -> RawRows:
+def _read_xlsx(path: Path) -> list[Sheet]:
     _check_xlsx(path)
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
-        sheet = workbook.active
-        return [(i, list(row)) for i, row in enumerate(sheet.iter_rows(values_only=True), start=1)]
+        return [
+            (sheet.title, [(i, list(row)) for i, row in enumerate(sheet.iter_rows(values_only=True), start=1)])
+            for sheet in workbook.worksheets
+        ]
     finally:
         workbook.close()

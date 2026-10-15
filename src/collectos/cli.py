@@ -89,7 +89,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def _cmd_import(args) -> int:
     report = import_invoices(args.file, default_credit_days=args.credit_days)
-    print(f"{report.source}: {len(report.invoices)} invoice(s) valid, {len(report.duplicates)} duplicate row(s), "
+    where = f" (sheet {report.sheet!r})" if report.sheet else ""
+    print(f"{report.source}{where}: {len(report.invoices)} invoice(s) valid, {len(report.duplicates)} duplicate row(s), "
           f"{len(report.errors)} rejected, {len(report.skipped_rows)} blank/total row(s) skipped")
     for e in report.errors[:20]:
         print(f"  row {e.row_no}: {e.message}")

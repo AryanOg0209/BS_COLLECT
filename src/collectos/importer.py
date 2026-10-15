@@ -12,7 +12,7 @@ from pathlib import Path
 from .dates import DateError, parse_date
 from .models import Invoice, InvoiceError
 from .money import MoneyError, to_money
-from .readers import RawRows, read_rows
+from .readers import RawRows, Sheet, read_sheets
 
 # Normalised header (lowercase, alphanumerics only) -> canonical field.
 # Tally-style names are included; confirm against a real export before relying on them.
@@ -50,6 +50,7 @@ class ImportedInvoice:
 @dataclass
 class ImportReport:
     source: str
+    sheet: str | None = None  # which worksheet the invoices came from (None for CSV)
     invoices: list[ImportedInvoice] = field(default_factory=list)
     errors: list[RowIssue] = field(default_factory=list)
     duplicates: list[RowIssue] = field(default_factory=list)
@@ -65,16 +66,35 @@ class ImportReport:
 def import_invoices(path: str | Path, default_credit_days: int | None = None) -> ImportReport:
     """Read a CSV/XLSX file and return validated invoices and a full issue report.
 
-    default_credit_days, if given, fills *missing* due dates as invoice_date + N days.
-    Each filled invoice number is listed in the report; nothing is filled otherwise.
+    Every worksheet is searched for the invoice table; the first one that has it is used
+    (and named in the report). default_credit_days, if given, fills *missing* due dates as
+    invoice_date + N days; each filled invoice number is listed in the report.
     """
     path = Path(path)
-    return import_rows(read_rows(path), source=path.name, default_credit_days=default_credit_days)
+    return import_sheets(read_sheets(path), source=path.name, default_credit_days=default_credit_days)
 
 
 def import_rows(rows: RawRows, source: str = "<memory>", default_credit_days: int | None = None) -> ImportReport:
-    header_idx, cols, headers = _find_header(rows)
-    report = ImportReport(source=source)
+    return import_sheets([(None, rows)], source=source, default_credit_days=default_credit_days)
+
+
+def import_sheets(sheets: list[Sheet], source: str = "<memory>", default_credit_days: int | None = None) -> ImportReport:
+    found = []
+    for name, rows in sheets:
+        try:
+            located = _locate_header(rows)
+        except ImportFileError as exc:
+            raise ImportFileError(f"sheet {name!r}: {exc}" if name else str(exc)) from None
+        if located is not None:
+            found.append((name, rows, located))
+    if not found:
+        raise ImportFileError(_no_header_message(sheets))
+
+    name, rows, (header_idx, cols, headers) = found[0]
+    report = ImportReport(source=source, sheet=name)
+    if len(found) > 1:
+        others = ", ".join(repr(n) for n, _, _ in found[1:])
+        report.warnings.append(f"invoice-like tables also found in sheet(s) {others}; used {name!r}")
 
     if "due_date" not in cols:
         report.warnings.append("no due-date column found; invoices will have no due date")
@@ -111,27 +131,52 @@ def import_rows(rows: RawRows, source: str = "<memory>", default_credit_days: in
     return report
 
 
-def _find_header(rows: RawRows) -> tuple[int, dict[str, int], list[str]]:
+def _locate_header(rows: RawRows) -> tuple[int, dict[str, int], list[str]] | None:
     for idx, (_, cells) in enumerate(rows[:_HEADER_SCAN_ROWS]):
-        cols: dict[str, int] = {}
-        clashes: list[str] = []
-        for i, cell in enumerate(cells):
-            name = _LOOKUP.get(_norm(cell))
-            if name is None:
-                continue
-            if name in cols:
-                clashes.append(f"{name}: columns {cols[name] + 1} and {i + 1}")
-            else:
-                cols[name] = i
+        cols, clashes = _recognise(cells)
         if _looks_like_header(cols):
             if clashes:
                 raise ImportFileError("ambiguous columns (two headers map to one field): " + "; ".join(clashes))
             return idx, cols, [str(c).strip() if c is not None else "" for c in cells]
-    raise ImportFileError(
-        "could not find a header row. Need columns for invoice number, customer, invoice date and "
-        "amount or outstanding. Accepted names: "
-        + "; ".join(f"{k}: {', '.join(v)}" for k, v in FIELD_ALIASES.items())
-    )
+    return None
+
+
+def _recognise(cells: list[object]) -> tuple[dict[str, int], list[str]]:
+    cols: dict[str, int] = {}
+    clashes: list[str] = []
+    for i, cell in enumerate(cells):
+        name = _LOOKUP.get(_norm(cell))
+        if name is None:
+            continue
+        if name in cols:
+            clashes.append(f"{name}: columns {cols[name] + 1} and {i + 1}")
+        else:
+            cols[name] = i
+    return cols, clashes
+
+
+def _no_header_message(sheets: list[Sheet]) -> str:
+    """Explain what was recognised in each sheet and what is missing (column names only, no data)."""
+    needs = "invoice_no, customer, invoice_date and (amount or outstanding)"
+    lines = [f"could not find an invoice table. Need columns for {needs}."]
+    for name, rows in sheets:
+        best_cols: dict[str, int] = {}
+        best_cells: list[object] = []
+        for _, cells in rows[:_HEADER_SCAN_ROWS]:
+            cols, _ = _recognise(cells)
+            if len(cols) > len(best_cols):
+                best_cols, best_cells = cols, cells
+        label = f"sheet {name!r}" if name else "file"
+        if len(best_cols) >= 2:
+            missing = [f for f in ("invoice_no", "customer", "invoice_date") if f not in best_cols]
+            if "amount" not in best_cols and "outstanding" not in best_cols:
+                missing.append("amount or outstanding")
+            seen = [str(c).strip()[:25] for c in best_cells if c is not None and str(c).strip()][:12]
+            lines.append(f"  {label}: recognised {sorted(best_cols)}; missing {missing}; its column titles are {seen}")
+        else:
+            lines.append(f"  {label}: no recognisable invoice columns")
+    lines.append("Accepted header names: " + "; ".join(f"{k}: {', '.join(v)}" for k, v in FIELD_ALIASES.items()))
+    return "\n".join(lines)
 
 
 def _looks_like_header(cols: dict[str, int]) -> bool:
