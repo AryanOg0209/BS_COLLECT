@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Real customer financial data must never be committed.
+# Only synthetic fixtures under tests/fixtures/ and data/synthetic/ are allowed.
+data/*
+!data/synthetic/
+!data/README.md
+*.db
+*.sqlite
+*.sqlite3
+*.xlsx
+*.xls
+*.csv
+!tests/fixtures/*.csv
+!data/synthetic/*.csv
+!data/synthetic/*.xlsx
+
+.DS_Store
+.env
