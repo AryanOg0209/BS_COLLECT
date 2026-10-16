@@ -481,3 +481,34 @@ table.matches td:last-child { white-space: nowrap; }
 table.layoutgrid { font-size: 12.5px; } table.layoutgrid th, table.layoutgrid td { padding: 6px 10px; white-space: nowrap; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
 table.layoutgrid tr.hdr td { background: rgba(224, 59, 217, 0.18); font-weight: 600; }
 details.why { margin: 4px 0 14px; color: var(--muted); } details.why summary { cursor: pointer; } pre.pre { white-space: pre-wrap; font: 12.5px/1.5 var(--font); background: rgba(0, 0, 0, 0.3); padding: 12px 14px; border-radius: 12px; }
+
+/* ---- collection extras: UPI box, ship check, cash calendar, statement/interest windows ---- */
+.upi-box { display: flex; gap: 16px; align-items: flex-start; margin: 4px 0 12px; padding: 14px 16px; border-radius: 14px; background: rgba(255, 255, 255, 0.045); border: 1px solid var(--line); }
+.upi-box .upiqr { flex: none; border-radius: 10px; background: #fff; padding: 6px; }
+.upi-box .sub { margin: 6px 0 0; }
+.stmt { margin-bottom: 14px; } .stmt .sub { margin: 10px 0 0; } .stmt .note { margin-bottom: 10px; }
+.field.inline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; } .field.inline input { width: 90px; }
+pre.brief-text { margin: 0 0 8px; max-height: 260px; overflow: auto; }
+.shipform { display: flex; flex-direction: column; gap: 4px; } .shipform .btn { align-self: flex-start; margin-top: 8px; }
+.verdict { border-radius: 16px; padding: 18px 20px; background: rgba(255, 255, 255, 0.04); box-shadow: inset 0 0 0 1px var(--line); }
+.verdict .vhead { display: flex; align-items: center; gap: 12px; } .verdict h2 { margin: 0; font-size: 22px; text-align: left; }
+.verdict .vdot { width: 14px; height: 14px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 18px var(--teal); flex: none; }
+.verdict.care .vdot, .verdict.new .vdot { background: #ffc857; box-shadow: 0 0 18px #ffc857; }
+.verdict.advance .vdot { background: #ff9f5a; box-shadow: 0 0 18px #ff9f5a; }
+.verdict.hold .vdot { background: var(--warn); box-shadow: 0 0 18px var(--warn); }
+.verdict.hold { box-shadow: inset 0 0 0 1px rgba(255, 107, 154, 0.45); }
+.verdict .briefing { margin: 14px 0; } .verdict dl.facts { margin-top: 6px; }
+.brief.bad { background: rgba(255, 107, 154, 0.14); box-shadow: inset 0 0 0 1px rgba(255, 107, 154, 0.45); } .brief.bad .ico { color: var(--warn); }
+.weeks { display: flex; flex-direction: column; gap: 8px; }
+details.weekrow { border-radius: 13px; background: rgba(255, 255, 255, 0.04); padding: 4px 14px; }
+details.weekrow summary { display: grid; grid-template-columns: 130px 1fr 96px; gap: 14px; align-items: center; padding: 10px 0; cursor: pointer; list-style: none; }
+details.weekrow summary::-webkit-details-marker { display: none; }
+.weekbar { display: flex; height: 12px; border-radius: 7px; background: rgba(255, 255, 255, 0.07); overflow: hidden; }
+.weekbar i { display: block; height: 100%; width: var(--w); } .weekbar i.firm, .swatch.firm { background: linear-gradient(90deg, #2f9c85, #5ad1b0); } .weekbar i.shaky, .swatch.shaky { background: linear-gradient(90deg, #e03bd9, #ff6b9a); }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 4px; margin-right: 6px; vertical-align: -1px; }
+details.weekrow .amt { text-align: right; }
+ul.weekitems { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+ul.weekitems li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 14px; } ul.weekitems li .num { margin-left: auto; }
+.setgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 4px 20px; margin: 12px 0; }
+@media (max-width: 700px) { details.weekrow summary { grid-template-columns: 1fr 80px; } details.weekrow .weekbar { grid-column: 1 / -1; order: 3; } .upi-box { flex-direction: column; } }
+@media print { .upi-box, .shipform { display: none; } }

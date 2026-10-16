@@ -7,7 +7,7 @@ name = "collectos"
 version = "0.1.0"
 description = "Receivables follow-up and ageing toolkit for Indian B2B SMEs (local-first)."
 requires-python = ">=3.12"
-dependencies = ["openpyxl>=3.1"]
+dependencies = ["openpyxl>=3.1", "segno>=1.6"]
 
 [project.scripts]
 collectos = "collectos.cli:main"

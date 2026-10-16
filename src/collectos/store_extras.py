@@ -16,6 +16,7 @@ from .errors import StoreError
 from .importer import ImportReport
 from .models import Promise, customer_key
 from .money import from_paise, to_money, to_paise
+from .upi import clean_payee, valid_vpa
 
 SCHEMA_V4 = """
 CREATE TABLE customers (
@@ -76,7 +77,8 @@ BEGIN SELECT RAISE(ABORT, 'ai_usage is append-only'); END;
 
 DISPUTE_CATEGORIES = ("price", "quantity", "quality", "delivery", "tax", "duplicate", "other")
 CHANNEL_PREFERENCES = ("", "call", "whatsapp", "email", "visit")
-SETTING_DEFAULTS = {"msme_supplier": "0", "default_country_code": "91", "ai_assist": "0", "ai_budget_usd": "2.00", "ai_usd_inr": "90.00"}
+SETTING_DEFAULTS = {"msme_supplier": "0", "default_country_code": "91", "ai_assist": "0", "ai_budget_usd": "2.00", "ai_usd_inr": "90.00",
+                    "upi_id": "", "payee_name": "", "interest_rate": "0.00", "interest_grace_days": "0", "monthly_outgoings": "0.00"}
 _PAYMENT_ACTIONS = ("invoice.updated", "invoice.settled")
 _UNSET = object()
 
@@ -186,8 +188,14 @@ class ExtrasMixin:
             raise StoreError("default_country_code must be 1 to 3 digits")
         if key == "ai_assist" and value not in ("0", "1"):
             raise StoreError("ai_assist must be 0 or 1")
-        if key in ("ai_budget_usd", "ai_usd_inr"):
+        if key in ("ai_budget_usd", "ai_usd_inr", "interest_rate", "monthly_outgoings"):
             value = self._money_setting(key, value)
+        if key == "upi_id" and value and not valid_vpa(value):
+            raise StoreError("upi_id must look like name@bank (letters, digits, dots, dashes)")
+        if key == "payee_name":
+            value = clean_payee(value)
+        if key == "interest_grace_days" and not (value.isdigit() and 0 <= int(value) <= 90):
+            raise StoreError("interest_grace_days must be a whole number from 0 to 90")
         before = self.get_setting(key)
         if before == value:
             return
@@ -199,7 +207,8 @@ class ExtrasMixin:
 
     @staticmethod
     def _money_setting(key: str, value: str) -> str:
-        low, high = (Decimal("0"), Decimal("100")) if key == "ai_budget_usd" else (Decimal("1"), Decimal("500"))
+        low, high = {"ai_budget_usd": (Decimal("0"), Decimal("100")), "interest_rate": (Decimal("0"), Decimal("60")),
+                     "monthly_outgoings": (Decimal("0"), Decimal("10000000000"))}.get(key, (Decimal("1"), Decimal("500")))
         try:
             number = Decimal(value)
         except Exception:
@@ -427,6 +436,18 @@ class ExtrasMixin:
             "SELECT a.before_json, a.after_json FROM audit_log a JOIN invoices i ON i.id = a.entity_id "
             "WHERE a.entity = 'invoice' AND a.action IN (?, ?) AND i.customer_key = ? AND a.ts > ?",
             (*_PAYMENT_ACTIONS, key, since_ts)).fetchall()
+        paise = 0
+        for r in rows:
+            delta = json.loads(r["after_json"])["paid_paise"] - json.loads(r["before_json"])["paid_paise"]
+            if delta > 0:
+                paise += delta
+        return from_paise(paise)
+
+    def payments_recorded_since(self, since_ts: str) -> Decimal:
+        """Sum of increases in recorded paid amounts (any customer) that arrived after since_ts."""
+        rows = self._db.execute(
+            "SELECT before_json, after_json FROM audit_log WHERE entity = 'invoice' AND action IN (?, ?) AND ts > ?",
+            (*_PAYMENT_ACTIONS, since_ts)).fetchall()
         paise = 0
         for r in rows:
             delta = json.loads(r["after_json"])["paid_paise"] - json.loads(r["before_json"])["paid_paise"]

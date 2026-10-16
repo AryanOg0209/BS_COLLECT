@@ -85,7 +85,7 @@
     dlg.classList.add("wide");
     dlg.replaceChildren(h("div", { class: "modal-inner" }, spinner("Preparing the draft…")));
     if (!dlg.open) dlg.showModal();
-    let lang = lang0, channel = "whatsapp", draft;
+    let lang = lang0, channel = "whatsapp", draft, upiOn = true;
     const sender = store.get("sender", ""), company = store.get("company", "");
     const text = h("textarea", { id: "s-text", class: "draft-edit", "aria-label": "Message text" });
     const subject = h("input", { id: "s-subject", "aria-label": "Email subject" });
@@ -100,7 +100,23 @@
       } catch (e) { dlg.replaceChildren(h("div", { class: "modal-inner" }, h("div", { class: "form-error", text: e.message }), h("div", { class: "modal-actions" }, h("button", { type: "button", class: "btn ghost", text: "Close", onclick: () => dlg.close() })))); return false; }
       return true;
     }
-    function fill() { text.value = channel === "whatsapp" ? draft.whatsapp : draft.email; subject.value = draft.subject; subject.hidden = channel !== "email"; }
+    function fill() { text.value = channel === "whatsapp" ? draft.whatsapp : draft.email; subject.value = draft.subject; subject.hidden = channel !== "email"; syncUpi(); }
+    // the UPI line is appended or removed in place, so anything the person already edited in the message is kept
+    function syncUpi() {
+      if (!draft.upi) return;
+      const line = draft.upi.text, has = text.value.includes(line);
+      if (upiOn && !has) text.value = `${text.value.replace(/\s+$/, "")}\n\n${line}`;
+      else if (!upiOn && has) text.value = text.value.replace(`\n\n${line}`, "").replace(line, "");
+    }
+    function upiBlock() {
+      if (!draft.upi) return writable() ? note("Add your UPI id in Settings to include a pay-by-UPI line and QR code in reminders.") : null;
+      const box = h("input", { type: "checkbox", id: "s-upi", checked: upiOn });
+      box.addEventListener("change", () => { upiOn = box.checked; syncUpi(); });
+      return h("div", { class: "upi-box" },
+        draft.upi.qr_available ? h("img", { class: "upiqr", src: draft.upi.qr, alt: `UPI QR code for ${draft.upi.id}`, width: 132, height: 132 }) : null,
+        h("div", {}, h("label", { for: "s-upi" }, box, ` Add my UPI details (${draft.upi.id}) to the message`),
+          h("p", { class: "sub", text: "Chat apps rarely make a upi:// link tappable, so the message shows your UPI id and amount. The QR code is for showing on a screen or saving: the customer scans it with any UPI app and the money goes straight to you. UPI per-payment limits apply." })));
+    }
     function sentPrompt(via) {
       confirm.replaceChildren(h("div", { class: "note" }, h("strong", { text: "Did you send it? " }), "If so, record it so the list knows this customer was contacted.",
         h("div", { class: "modal-actions", style: { "margin-top": "10px" } },
@@ -132,6 +148,7 @@
         !blocked && channel === "email" && !c.email ? note("No email saved yet, so the mail app cannot open. Add one below.") : null,
         channel === "email" ? h("div", { class: "field" }, h("label", { for: "s-subject", text: "Subject" }), subject) : null,
         h("div", { class: "field" }, h("label", { for: "s-text", text: "Message (you can edit it before sending)" }), text),
+        upiBlock(),
         h("p", { class: "sub", text: "This opens your own WhatsApp or mail app with the text filled in. You read it and press send; CollectOS never sends anything itself." })].filter(Boolean));
     }
 
@@ -148,6 +165,7 @@
     draw();
   }
   CO.openSend = openSend; CO.openEditCustomer = openEditCustomer; CO.openDispute = openDispute;
+  CO.ui = { card, note, spinner, back, simpleTable, stageChip, when };
 
   /* ---------- dashboard additions: mini KPIs, daily briefing, data health ---------- */
   CO.extra.dashboardTop = (d) => {
@@ -200,6 +218,7 @@
       h("button", { type: "button", class: "btn small", onclick: () => openSend(d.customer) }, icon("chat"), "Send reminder"),
       canWrite ? h("button", { type: "button", class: "btn small ghost", onclick: () => CO.openFollowup(d.customer) }, icon("phone"), "Log follow-up") : null,
       canWrite ? h("button", { type: "button", class: "btn small ghost", onclick: () => openEditCustomer(d, refresh) }, icon("edit"), "Edit details") : null);
+    if (CO.extra.customerActions) actions.append(...CO.extra.customerActions(d));
     root.append(back("#/customers", "Customers"), viewHead(d.customer, `As of ${dmy(d.as_of)}`, actions));
     const chips = h("div", { class: "chiprow" }, stageChip(d.stage, d.stage_label, d.stage_why), p.do_not_contact ? h("span", { class: "chip muted", text: "Do not contact" }) : null,
       s.over_limit ? h("span", { class: "chip broken", text: "Over credit limit" }) : null, d.waiting_reason ? h("span", { class: "chip muted", text: d.waiting_reason }) : null);

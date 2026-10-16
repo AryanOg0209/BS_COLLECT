@@ -111,7 +111,7 @@
     chartMode: "age", calYM: null, calSel: null, filter: "", remindFor: null, trendMetric: "overdue",
   };
   // Sidebar order. Screens registered by features.js slot in by id; ids not listed here are reachable by link only.
-  const NAV_ORDER = ["dashboard", "queue", "customers", "promises", "disputes", "credit", "reminders", "import", "payments", "trend", "activity", "settings"];
+  const NAV_ORDER = ["dashboard", "queue", "customers", "promises", "cashflow", "shipcheck", "disputes", "credit", "reminders", "import", "payments", "trend", "activity", "settings"];
   const NAV = [
     ["dashboard", "Dashboard", "dashboard"], ["queue", "Work Queue", "queue"], ["customers", "Customers", "customers"],
     ["promises", "Promises", "promises"], ["reminders", "Reminders", "reminders"], ["trend", "Trend", "trend"], ["settings", "Settings", "settings"],
@@ -596,7 +596,8 @@
           h("span", { class: "hint", text: d.settings.msme_caution })) : null,
         h("div", { class: "field", style: { "margin-top": "14px" } }, h("label", { for: "set-lang", text: "Default language for reminder drafts" }), lang),
         h("p", { class: "sub", text: "Figures describe the data supplied. They are not accounting, tax or legal advice and do not predict or guarantee collections." })),
-      CO.extra.settingsAi ? CO.extra.settingsAi(d) : null));
+      CO.extra.settingsAi ? CO.extra.settingsAi(d) : null,
+      CO.extra.settingsMore ? CO.extra.settingsMore(d) : null));
   }
 
   /* ---------- shell ---------- */

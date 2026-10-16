@@ -120,7 +120,8 @@ def build_overview(store: Store, as_of: date, db_name: str = "") -> dict:
     }
     return {
         "as_of": as_of.isoformat(), "db_name": db_name, "kpi": kpi, "health": health, "ageing": ageing,
-        "settings": {"msme_supplier": msme_on, "msme_caution": CAUTION, "msme_days": MSME_DAYS},
+        "settings": {"msme_supplier": msme_on, "msme_caution": CAUTION, "msme_days": MSME_DAYS,
+                     **{k: store.get_setting(k) for k in ("upi_id", "payee_name", "interest_rate", "interest_grace_days", "monthly_outgoings")}},
         "trend": [{"as_of": s.as_of.isoformat(), "total_outstanding": _m(s.total_outstanding), "overdue": _m(s.overdue), "over60": _m(s.over60),
                    "over90": _m(s.over90), "followups_7d": s.followups_7d, "broken_promises": s.broken_promises, "payments_observed": _m(s.payments_observed)}
                   for s in snapshots],

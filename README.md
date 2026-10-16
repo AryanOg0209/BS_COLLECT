@@ -16,7 +16,7 @@ Codename only; not a registered brand. Status: early build, **not yet validated 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                                  # 585 tests
+.venv/bin/pytest                                  # 633 tests
 
 # Build the whole 10-minute demo kit from synthetic data
 .venv/bin/collectos demo ./demo-kit
@@ -55,6 +55,12 @@ collectos ui --db showcase-kit/demo.db           # opens http://127.0.0.1:8765
 | WhatsApp is how India collects, but the API costs money | One click opens **your own WhatsApp / mail / phone app** with a drafted message (English or Hinglish) you can edit. You press send, then log it with one click. Nothing is sent by CollectOS. |
 | Credit control | Per-customer credit limits, exposure vs limit, a credit-watch list, do-not-contact flags. |
 | Did a customer pay? | Upload a bank statement: credits are matched to customers/invoices **as suggestions with reasons** (invoice number, name, exact amount, possible TDS shortfall). It never changes a balance. |
+| "Send me the ledger" (the classic stall) | **Statement of account** and a **balance-confirmation letter** per customer: message text plus a downloadable Excel file. Only open items in your data are listed. |
+| Making it easy to pay | Your own **UPI id** and a **QR code** in reminders. No payment gateway, no fees: the money goes straight to your account. |
+| "Should I offer to waive interest?" | **Interest and waiver offer** at the rate *you* set from your invoice terms: simple interest per invoice, disputed invoices left out, and a draft "pay by this date and we waive it". Wording is for you and your CA to confirm. |
+| Selling to someone who already owes | **Can I ship this order?** Dues, credit limit, broken promises and disputes become ship / ship with care / ask for an advance / hold, with the reasons and the rules shown. It never blocks anything. |
+| "Will we have the cash for salaries?" | A **cash calendar**: money that actually has a date (customers' own promises and invoices due by terms), week by week, firm vs shaky, against your fixed monthly outgoings. Overdue money with no date is listed separately and never counted. |
+| Starting the day | A **morning brief** you can paste into WhatsApp: who to call, promises due, broken promises, payments recorded in the last 24 hours. |
 | Away from the screen | A printable **call sheet** with blank columns for what they said. |
 | "What changed, and who did it?" | An **activity** feed over an append-only audit log, plus a one-click backup of the whole database. |
 | Did it help? | Day-1 baseline and weekly snapshots, shown as a trend. Descriptive only, never claimed as causation. |

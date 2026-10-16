@@ -360,6 +360,11 @@ def _enrich_demo(db: Path, as_of: date, ranked: list[str], clock, final) -> None
             big = max((i for i in store.invoices() if customer_key(i.customer) == customer_key(ranked[1]) and i.outstanding > 0), key=lambda i: i.outstanding)
             store.open_dispute(big.invoice_no, ranked[1], "price", "demo", note="Customer says the rate differs from the quotation.", owner="Sales manager")
         store.set_setting("msme_supplier", "1", "demo")
+        # sample payment details so the UPI, interest and cash-calendar screens have something to show (all synthetic)
+        store.set_setting("upi_id", "demo.company@examplebank", "demo")
+        store.set_setting("payee_name", "Demo Company", "demo")
+        store.set_setting("interest_rate", "18", "demo")
+        store.set_setting("monthly_outgoings", "900000", "demo")
     if len(ranked) > 5:
         # A promise whose payment then shows up in the next export: the dashboard suggests it was kept.
         with Store(db, now=clock(8)) as store:

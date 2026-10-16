@@ -215,7 +215,7 @@ WEBUI = Path(web.__file__).parent / "webui"
 
 
 def test_frontend_never_builds_html_from_strings():
-    js = (WEBUI / "app.js").read_text() + (WEBUI / "features.js").read_text()
+    js = "".join((WEBUI / n).read_text() for n in ("app.js", "features.js", "extras.js"))
     for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "setAttribute(\"style\""):
         assert banned not in js, f"{banned} would let imported text become markup or code"
 
@@ -225,7 +225,7 @@ ALLOWED_CLICK_TARGETS = {"http://www.w3.org/2000/svg", "https://wa.me/"}
 
 
 def test_frontend_loads_nothing_from_other_origins():
-    for name in ("index.html", "app.css", "app.js", "features.js", "logo.svg"):
+    for name in ("index.html", "app.css", "app.js", "features.js", "extras.js", "logo.svg"):
         text = (WEBUI / name).read_text()
         urls = [u for u in re.findall(r"https?://[^\s\"')`$]+", text) if u not in ALLOWED_CLICK_TARGETS]
         assert not urls, f"{name} references external resources: {urls}"
@@ -234,9 +234,9 @@ def test_frontend_loads_nothing_from_other_origins():
 
 
 def test_frontend_only_ever_fetches_its_own_server():
-    for name in ("app.js", "features.js"):
+    for name in ("app.js", "features.js", "extras.js"):
         text = (WEBUI / name).read_text()
         assert not re.search(r"fetch\(\s*[\"'`]https?:", text), f"{name} fetches an absolute URL"
         assert not re.search(r"(XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)", text), f"{name} opens another kind of connection"
         for src in re.findall(r"\bsrc\s*[:=]\s*[\"']([^\"']+)", text):
-            assert src.startswith("/static/") or src.startswith("data:"), f"{name} loads {src}"
+            assert src.startswith(("/static/", "data:", "/upi-qr.svg?")), f"{name} loads {src}"

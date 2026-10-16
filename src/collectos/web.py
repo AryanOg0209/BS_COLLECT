@@ -25,25 +25,33 @@ from datetime import date, datetime
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from .ageing import Status, assess
+from .brief import morning_brief
+from .cashcal import cash_calendar
 from .contacts import mailto_link, tel_link, whatsapp_link
 from .dates import DateError, parse_date
 from .ai import FIELDS, AiError, AiInputError, AiUnavailable, Assistant
 from .importer import ColumnMap, NoInvoiceTable, import_invoices
+from .interest import interest_statement
 from .matcher import StatementError, parse_statement, suggest
+from .models import customer_key
 from .money import MoneyError, to_money
 from .readers import read_sheets
 from .reminders import LANGUAGES, Sender, draft_for_customer
 from .report import write_owner_report
+from .shipcheck import ship_check
+from .statements import account_statement, write_statement_xlsx
 from .store import Store, StoreError
 from .uploads import MAX_UPLOAD, UploadError, UploadStore
+from .upi import clean_note, payment_line, qr_svg, upi_link, valid_vpa
 from .overview import _m, build_overview, customer_detail
 from .workqueue import build_queue
 
 WEB_DIR = Path(__file__).parent / "webui"
 STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.css": "text/css; charset=utf-8",
-                "app.js": "text/javascript; charset=utf-8", "features.js": "text/javascript; charset=utf-8", "logo.svg": "image/svg+xml"}
+                "app.js": "text/javascript; charset=utf-8", "features.js": "text/javascript; charset=utf-8", "extras.js": "text/javascript; charset=utf-8", "logo.svg": "image/svg+xml"}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 _ZERO = Decimal("0.00")
@@ -123,6 +131,20 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(200, Assistant(store, client=self.server.ai_client).status())
             if url.path == "/api/customer":
                 return self._customer(query)
+            if url.path == "/api/brief":
+                return self._brief(query)
+            if url.path == "/api/cashcal":
+                return self._cashcal(query)
+            if url.path == "/api/shipcheck":
+                return self._shipcheck(query)
+            if url.path == "/api/interest":
+                return self._interest(query)
+            if url.path == "/api/account-statement":
+                return self._account_statement(query)
+            if url.path == "/account-statement.xlsx":
+                return self._account_statement_xlsx(query)
+            if url.path == "/upi-qr.svg":
+                return self._upi_qr(query)
             if url.path == "/api/activity":
                 return self._activity(query)
             if url.path == "/backup.db":
@@ -252,7 +274,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _post_setting(self, body: dict) -> dict:
         with Store(self.server.db_path) as store:
-            store.set_setting(_text(body, "key", required=True), _text(body, "value", required=True), _actor(body))
+            store.set_setting(_text(body, "key", required=True), _text(body, "value"), _actor(body))
         return {"ok": True}
 
     def _post_settle(self, body: dict) -> dict:
@@ -456,12 +478,16 @@ class _Handler(BaseHTTPRequestHandler):
         if language not in LANGUAGES:
             return self._error(400, f"language must be one of: {', '.join(LANGUAGES)}")
         sender = Sender(query.get("sender") or "Your name", query.get("company") or "Your company")
+        as_of = self._as_of(query)
         with Store(self.server.db_path) as store:
-            draft = draft_for_customer(store.invoices(), store.open_promises(), customer, sender, self._as_of(query), language)
+            invoices = store.invoices()
+            draft = draft_for_customer(invoices, store.open_promises(), customer, sender, as_of, language)
             profile = store.customer_profile(customer)
         blocked = profile.do_not_contact
+        owed = sum((a.outstanding for a in (assess(i, as_of) for i in invoices if customer_key(i.customer) == profile.key) if a.status is Status.OVERDUE), _ZERO)
+        upi = self._upi_block(query, owed)
         self._json(200, {
-            "template": draft.template, "subject": draft.subject, "email": draft.email_body, "whatsapp": draft.whatsapp_text, "language": language,
+            "template": draft.template, "subject": draft.subject, "email": draft.email_body, "whatsapp": draft.whatsapp_text, "language": language, "upi": upi,
             "contact": {"person": profile.contact_person, "phone": profile.phone, "email": profile.email, "preferred": profile.preferred_channel,
                         "do_not_contact": blocked},
             # links only open the person's own WhatsApp / mail / phone app with the text filled in; nothing is sent from here
@@ -484,6 +510,114 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(400, "limit and before must be whole numbers")
         with Store(self.server.db_path) as store:
             self._json(200, {"entries": store.activity(limit, before)})
+
+    # -- read-only helpers for the extra screens (nothing here changes data) ---------
+    def _upi_block(self, query: dict, amount: Decimal) -> dict | None:
+        """The owner's own UPI details for a reminder, or None until a valid UPI id is saved in Settings."""
+        with Store(self.server.db_path) as store:
+            vpa, payee = store.get_setting("upi_id"), store.get_setting("payee_name")
+        if not valid_vpa(vpa):
+            return None
+        note = clean_note(query.get("customer", ""))[:24].strip()   # shows on the owner's bank statement, to match the payment
+        hi = query.get("language") == "hinglish"
+        return {"id": vpa, "payee": payee, "amount": f"{amount:.2f}", "text": payment_line(vpa, amount, note, hi),
+                "qr": f"/upi-qr.svg?amount={amount:.2f}&note={quote(note, safe='')}", "qr_available": qr_svg("x") is not None}
+
+    def _brief(self, query: dict) -> None:
+        with Store(self.server.db_path) as store:
+            self._json(200, morning_brief(store, self._as_of(query), (query.get("company") or "")[:60]))
+
+    def _cashcal(self, query: dict) -> None:
+        with Store(self.server.db_path) as store:
+            outgoings = to_money(store.get_setting("monthly_outgoings"))
+            self._json(200, cash_calendar(store.invoices(), store.open_promises(), store.reliability(self._as_of(query)),
+                                          store.disputed_invoice_keys(), self._as_of(query), outgoings))
+
+    def _shipcheck(self, query: dict) -> None:
+        name = (query.get("customer") or "").strip()
+        if not name:
+            return self._error(400, "customer is required")
+        try:
+            order = to_money(query.get("order", ""))
+        except MoneyError:
+            return self._error(400, "order must be an amount in rupees")
+        as_of = self._as_of(query)
+        with Store(self.server.db_path) as store:
+            invoices = store.invoices()
+            key = " ".join(name.split()).casefold()
+            known = next((i.customer for i in invoices if " ".join(i.customer.split()).casefold() == key), None)
+            if known is None:
+                return self._json(200, ship_check(invoices, name, order, as_of))
+            profile = store.customer_profile(known)
+            rel = store.reliability(as_of).get(profile.key)
+            disputes = [d for d in store.disputes("open") if d.customer_key == profile.key]
+            self._json(200, ship_check(invoices, known, order, as_of, profile.credit_limit, rel.kept if rel else 0, rel.broken if rel else 0,
+                                       len(disputes), profile.do_not_contact))
+
+    def _interest(self, query: dict) -> None:
+        name = (query.get("customer") or "").strip()
+        if not name:
+            return self._error(400, "customer is required")
+        language = query.get("language") or "en"
+        try:
+            days = int(query.get("waiver_days", "7"))
+        except ValueError:
+            return self._error(400, "waiver_days must be a whole number")
+        with Store(self.server.db_path) as store:
+            rate, grace = Decimal(store.get_setting("interest_rate")), int(store.get_setting("interest_grace_days"))
+            data = interest_statement(store.invoices(), name, self._as_of(query), rate, grace, store.disputed_invoice_keys(), days,
+                                      (query.get("sender") or "")[:60], (query.get("company") or "")[:60], language)
+            if store.get_setting("msme_supplier") != "1":
+                data.pop("msmed_note", None)
+            if data.get("configured"):
+                profile = store.customer_profile(data["customer"])
+                draft = data["draft"]
+                data["contact"] = {"phone": profile.phone, "email": profile.email, "do_not_contact": profile.do_not_contact}
+                data["links"] = None if profile.do_not_contact or not draft else {
+                    "whatsapp": whatsapp_link(profile.phone, draft["whatsapp"]), "email": mailto_link(profile.email, draft["subject"], draft["email"])}
+        self._json(200, data)
+
+    def _statement_data(self, query: dict) -> dict:
+        name = (query.get("customer") or "").strip()
+        if not name:
+            raise ValueError("customer is required")
+        language = query.get("language") or "en"
+        with Store(self.server.db_path) as store:
+            data = account_statement(store.invoices(), name, self._as_of(query), (query.get("sender") or "")[:60], (query.get("company") or "")[:60], language)
+            profile = store.customer_profile(data["customer"])
+        data["contact"] = {"phone": profile.phone, "email": profile.email, "do_not_contact": profile.do_not_contact}
+        blocked = profile.do_not_contact
+        subject = f"Statement of account as on {date.fromisoformat(data['as_of']).strftime('%d-%b-%Y')}"
+        data["subject"] = subject
+        data["links"] = None if blocked else {"whatsapp": whatsapp_link(profile.phone, data["message"]), "email": mailto_link(profile.email, subject, data["message"]),
+                                              "email_confirmation": mailto_link(profile.email, "Balance confirmation request", data["confirmation"])}
+        return data
+
+    def _account_statement(self, query: dict) -> None:
+        self._json(200, self._statement_data(query))
+
+    def _account_statement_xlsx(self, query: dict) -> None:
+        data = self._statement_data(query)
+        with tempfile.TemporaryDirectory() as tmp:
+            body = write_statement_xlsx(Path(tmp) / "statement.xlsx", data, (query.get("company") or "")[:60]).read_bytes()
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "-", data["customer"]).strip("-")[:40] or "customer"
+        self._send(200, body, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                   {"Content-Disposition": f'attachment; filename="statement-{safe}-{data["as_of"]}.xlsx"'})
+
+    def _upi_qr(self, query: dict) -> None:
+        with Store(self.server.db_path) as store:
+            vpa, payee = store.get_setting("upi_id"), store.get_setting("payee_name")
+        if not valid_vpa(vpa):
+            return self._error(404, "set your UPI id in Settings first")
+        try:
+            amount = to_money(query["amount"]) if query.get("amount") else None
+            link = upi_link(vpa, payee, amount, query.get("note", ""))
+        except (MoneyError, ValueError) as exc:
+            return self._error(400, str(exc))
+        svg = qr_svg(link)
+        if svg is None:
+            return self._error(404, "QR codes need the segno package: pip install segno")
+        self._send(200, svg, "image/svg+xml")
 
     def _backup(self) -> None:
         with Store(self.server.db_path) as store, tempfile.TemporaryDirectory() as tmp:
