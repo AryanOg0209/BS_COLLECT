@@ -15,6 +15,7 @@ All text shown in the page comes from imported files and is untrusted: the clien
 it with textContent only, never as HTML.
 """
 
+import html
 import json
 import re
 import secrets
@@ -50,6 +51,26 @@ from .overview import _m, build_overview, customer_detail
 from .workqueue import build_queue
 
 WEB_DIR = Path(__file__).parent / "webui"
+SITE_DIR = Path(__file__).parent / "site"
+SITE_ASSET = re.compile(r"(?:img/)?[A-Za-z0-9_-]+\.(css|js|jpg|png|svg)")
+SITE_ASSET_TYPES = {"css": "text/css; charset=utf-8", "js": "text/javascript; charset=utf-8", "jpg": "image/jpeg", "png": "image/png", "svg": "image/svg+xml"}
+# the dashboard screens the website links into when it is served by the app: (label, route, what it is)
+APP_LINKS = (
+    ("Dashboard", "dashboard", "Overdue, today's briefing, ageing and the promise calendar"),
+    ("Work queue", "queue", "Who to call today, with the reasons behind each score"),
+    ("Customers", "customers", "Every customer, with a full page for each"),
+    ("Promises", "promises", "Who promised what, and whether they kept it"),
+    ("Cash calendar", "cashflow", "Dated money, week by week, against your outgoings"),
+    ("Ship check", "shipcheck", "Check a customer before you dispatch an order"),
+    ("Disputes", "disputes", "Disputed invoices, kept out of the chase list"),
+    ("Credit", "credit", "Limits, exposure and the credit watch list"),
+    ("Reminders", "reminders", "Drafts in English or Hinglish, sent from your own apps"),
+    ("Import", "import", "Preview what changes before anything is saved"),
+    ("Payments", "payments", "Match bank credits to customers, as suggestions"),
+    ("Trend", "trend", "Week-by-week position since day one"),
+    ("Activity", "activity", "Everything that changed, and who did it"),
+    ("Settings", "settings", "UPI, interest, outgoings and the optional AI assist"),
+)
 STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.css": "text/css; charset=utf-8",
                 "app.js": "text/javascript; charset=utf-8", "features.js": "text/javascript; charset=utf-8", "extras.js": "text/javascript; charset=utf-8", "logo.svg": "image/svg+xml"}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -117,7 +138,11 @@ class _Handler(BaseHTTPRequestHandler):
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
         try:
             if url.path in ("/", "/index.html"):
+                return self._home()
+            if url.path in ("/app", "/app/"):
                 return self._static("index.html")
+            if url.path in ("/site.css", "/site.js") or url.path.startswith("/img/"):
+                return self._site_asset(url.path.lstrip("/"))
             if url.path.startswith("/static/"):
                 return self._static(url.path.removeprefix("/static/"))
             if url.path == "/api/session":
@@ -454,6 +479,32 @@ class _Handler(BaseHTTPRequestHandler):
         return result
 
     # -- handlers --------------------------------------------------------------
+    def _home(self) -> None:
+        """The website, with its buttons pointed at this dashboard (the markers are in the HTML; nothing here comes from user data)."""
+        page = (SITE_DIR / "index.html").read_text(encoding="utf-8")
+        cards = "".join(
+            f'<li class="card tilt reveal"><a class="cardlink" href="/app/#/{route}"><h3>{html.escape(label)}</h3><p>{html.escape(blurb)}</p></a></li>'
+            for label, route, blurb in APP_LINKS)
+        note = ('<p class="demo-note">You are looking at a synthetic demo dataset, read-only. Nothing here is real customer data.</p>' if self.server.demo else "")
+        swaps = {
+            "app-nav": '<a href="#product">Your dashboard</a><a class="btn small" href="/app/">Open dashboard</a>',
+            "app-hero": '<a class="btn" href="/app/">Open the dashboard</a>',
+            "app-jump": ('<section class="wrap band" id="product" aria-labelledby="prod-h"><h2 id="prod-h" class="center">Your dashboard</h2>'
+                         '<p class="center sub">Everything below runs on this computer. Pick a screen to jump straight in.</p>' + note +
+                         f'<ul class="grid4">{cards}</ul></section>'),
+        }
+        for name, replacement in swaps.items():
+            page = re.sub(rf"<!--{name}-->.*?<!--/{name}-->", lambda _m, r=replacement: r, page, flags=re.S)
+        self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _site_asset(self, rel: str) -> None:
+        if not SITE_ASSET.fullmatch(rel):   # a strict pattern, so there is no path to traverse
+            return self._error(404, "not found")
+        path = SITE_DIR / rel
+        if not path.is_file():
+            return self._error(404, "not found")
+        self._send(200, path.read_bytes(), SITE_ASSET_TYPES[rel.rsplit(".", 1)[1]])
+
     def _static(self, name: str) -> None:
         if name not in STATIC_FILES:  # an allow-list, so there is no path to traverse
             return self._error(404, "not found")
@@ -703,13 +754,14 @@ def _actor(body: dict) -> str:
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, db_path: str | Path, port: int = 0, read_only: bool = False, ai_client=None):
+    def __init__(self, db_path: str | Path, port: int = 0, read_only: bool = False, ai_client=None, demo: bool = False):
         super().__init__(("127.0.0.1", port), _Handler)  # loopback only
         self.db_path = str(db_path)
         self.read_only = read_only
         self.token = secrets.token_urlsafe(32)  # new on every start; never written to disk
         self.uploads = UploadStore()
         self.ai_client = ai_client  # None means: build a real client from the environment when AI is used (tests inject a fake)
+        self.demo = demo
         actual = self.server_address[1]
         self.allowed_hosts = {f"127.0.0.1:{actual}", f"localhost:{actual}"}
 
@@ -722,16 +774,16 @@ class DashboardServer(ThreadingHTTPServer):
         return f"http://127.0.0.1:{self.server_address[1]}/"
 
 
-def make_server(db_path: str | Path, port: int = 0, read_only: bool = False, ai_client=None) -> DashboardServer:
+def make_server(db_path: str | Path, port: int = 0, read_only: bool = False, ai_client=None, demo: bool = False) -> DashboardServer:
     if not Path(db_path).is_file():
         raise FileNotFoundError(f"database not found: {db_path} (import data first, or build one with `collectos demo`)")
-    return DashboardServer(db_path, port, read_only, ai_client)
+    return DashboardServer(db_path, port, read_only, ai_client, demo)
 
 
-def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True, read_only: bool = False) -> None:
-    server = make_server(db_path, port, read_only)
-    mode = "read-only" if read_only else "can record follow-ups"
-    print(f"CollectOS dashboard: {server.url}  ({mode}; this computer only; Ctrl+C to stop)")
+def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True, read_only: bool = False, demo: bool = False) -> None:
+    server = make_server(db_path, port, read_only, demo=demo)
+    mode = "synthetic demo data, read-only" if demo else ("read-only" if read_only else "can record follow-ups")
+    print(f"CollectOS: {server.url}  (website)   {server.url}app/  (dashboard)\n  {mode}; this computer only; Ctrl+C to stop")
     if open_browser:
         threading.Timer(0.4, webbrowser.open, args=(server.url,)).start()
     try:

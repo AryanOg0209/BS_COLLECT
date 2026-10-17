@@ -5,7 +5,7 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 
-SITE = Path(__file__).resolve().parent.parent / "site"
+SITE = Path(__file__).resolve().parent.parent / "src" / "collectos" / "site"
 HTML = (SITE / "index.html").read_text(encoding="utf-8")
 CSS = (SITE / "site.css").read_text(encoding="utf-8")
 JS = (SITE / "site.js").read_text(encoding="utf-8")

@@ -20,7 +20,7 @@ ai = ["anthropic>=1.0"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-collectos = ["webui/*"]
+collectos = ["webui/*", "site/*", "site/img/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

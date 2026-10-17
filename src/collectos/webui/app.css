@@ -512,3 +512,7 @@ ul.weekitems li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap
 .setgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 4px 20px; margin: 12px 0; }
 @media (max-width: 700px) { details.weekrow summary { grid-template-columns: 1fr 80px; } details.weekrow .weekbar { grid-column: 1 / -1; order: 3; } .upi-box { flex-direction: column; } }
 @media print { .upi-box, .shipform { display: none; } }
+
+.homelink { display: flex; align-items: center; min-height: 44px; padding: 0 14px; margin: 0 4px 8px; border-radius: 12px; color: var(--muted); text-decoration: none; font-size: 14px; }
+.homelink:hover { color: var(--text); background: rgba(255, 255, 255, 0.07); }
+.app[data-collapsed="true"] .homelink { font-size: 0; padding: 0; justify-content: center; } .app[data-collapsed="true"] .homelink::before { content: "\2190"; font-size: 18px; }

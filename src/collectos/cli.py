@@ -1,8 +1,11 @@
 """Command-line interface. Thin: parses arguments, calls the layers, prints results."""
 
 import argparse
+import contextlib
+import io
 import os
 import sys
+import tempfile
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -86,6 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-open", action="store_true", help="do not open a browser window")
     p.add_argument("--read-only", action="store_true", help="disable all buttons that change data (useful when showing the screen)")
+    p.add_argument("--demo", action="store_true", help="show the website and dashboard on a synthetic, read-only demo dataset (your own data is not touched)")
     p.set_defaults(func=_cmd_ui)
 
     p = sub.add_parser("ai-check", help="make ONE tiny AI request to confirm your key, model and answer format work (costs a fraction of a paisa)")
@@ -186,6 +190,15 @@ def _cmd_report(args) -> int:
 
 
 def _cmd_ui(args) -> int:
+    if args.demo:
+        # a throwaway synthetic dataset in a temp folder: your own database is never opened
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "demo"
+            out.mkdir()
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_demo(out, date.today())
+            web.serve(out / "demo.db", port=args.port, open_browser=not args.no_open, read_only=True, demo=True)
+        return 0
     web.serve(args.db, port=args.port, open_browser=not args.no_open, read_only=args.read_only)
     return 0
 

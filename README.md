@@ -91,12 +91,15 @@ data* (increases in recorded paid amounts that arrived via imports since the pre
 audit log). These numbers are descriptive: they do not prove that follow-up work caused any change, and
 invoices that merely disappear from an export are not counted as payments.
 
-## Website
-A self-contained, accessible 3D marketing page lives in `site/` (plain HTML, CSS and a little JavaScript; no external requests, no pricing, synthetic screenshots only).
+## Website and dashboard in one interface
+The 3D website is the front door and the dashboard sits behind it, all served from your computer:
 ```bash
-python3 -m http.server 8830 -d site       # then open http://127.0.0.1:8830
+collectos ui --db data/acme.db        # http://127.0.0.1:8765  = website; /app/ = your dashboard
+collectos ui --demo                   # the same, on a synthetic read-only demo dataset (touches none of your data)
 ```
-Before publishing it anywhere, replace the placeholder address `hello@collectos.example` in `site/index.html` with a real contact.
+The website's pages link into every dashboard screen, and the dashboard's logo links back home. The site is plain HTML, CSS and a little
+JavaScript with no external requests, no pricing and synthetic screenshots only; it lives in `src/collectos/site/` and can also be hosted on its own
+(`python3 -m http.server 8830 -d src/collectos/site`). Before publishing it, replace the placeholder address `hello@collectos.example` in `index.html`.
 
 ## Layers
 | # | Layer | Module(s) | Status |
