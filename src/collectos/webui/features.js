@@ -34,17 +34,19 @@
     const pref = h("select", { id: "e-pref" }, ...[["", "No preference"], ["call", "Phone call"], ["whatsapp", "WhatsApp"], ["email", "Email"], ["visit", "Visit"]]
       .map(([v, t]) => h("option", { value: v, text: t, selected: p.preferred === v })));
     const limit = h("input", { id: "e-limit", value: p.credit_limit ? String(Number(p.credit_limit)) : "", placeholder: "Leave empty for no limit", inputmode: "decimal" });
+    const group = h("input", { id: "e-group", value: p.group || "", placeholder: "e.g. Gupta Group", maxlength: "120" });
     const dnc = h("input", { type: "checkbox", id: "e-dnc", checked: p.do_not_contact });
     const notes = h("textarea", { id: "e-notes", placeholder: "Anything worth remembering (best time to call, who decides...)" }); notes.value = p.notes;
     openModal({
       title: `Details for ${detail.customer}`, intro: "Saved on this computer only. A phone number lets you open WhatsApp or a call with one click.",
       fields: [field("Contact person", person), h("div", { class: "promise-box", style: { background: "none", border: "0", padding: "0" } }, field("Phone", phone), field("Email", email)),
         field("Preferred way to reach them", pref), field("Credit limit (₹)", limit, "Used to flag when what they owe goes over your limit."),
+        field("Group (related firms)", group, "Same promoter or family? Give their firms the same group name to see their exposure together."),
         h("label", { class: "checkrow" }, dnc, h("span", { text: "Do not contact (handle this customer outside the daily list)" })), field("Notes", notes)],
       submit: "Save details",
       onSubmit: async () => {
         await post("/api/customer/update", { customer: detail.customer, contact_person: person.value, phone: phone.value, email: email.value, preferred_channel: pref.value,
-          credit_limit: limit.value, do_not_contact: dnc.checked, notes: notes.value, actor: actor() });
+          credit_limit: limit.value, group: group.value, do_not_contact: dnc.checked, notes: notes.value, actor: actor() });
         if (after) setTimeout(after, 50);
         return "Details saved.";
       },
@@ -85,7 +87,8 @@
     dlg.classList.add("wide");
     dlg.replaceChildren(h("div", { class: "modal-inner" }, spinner("Preparing the draft…")));
     if (!dlg.open) dlg.showModal();
-    let lang = lang0, channel = "whatsapp", draft, upiOn = true;
+    let lang = lang0, channel = "whatsapp", draft;
+    const addOn = { upi: true, gst180: false };   // optional lines a person can add to the message
     const sender = store.get("sender", ""), company = store.get("company", "");
     const text = h("textarea", { id: "s-text", class: "draft-edit", "aria-label": "Message text" });
     const subject = h("input", { id: "s-subject", "aria-label": "Email subject" });
@@ -101,21 +104,33 @@
       return true;
     }
     function fill() { text.value = channel === "whatsapp" ? draft.whatsapp : draft.email; subject.value = draft.subject; subject.hidden = channel !== "email"; syncUpi(); }
-    // the UPI line is appended or removed in place, so anything the person already edited in the message is kept
+    // an optional line is appended or removed in place, so anything the person already edited in the message is kept
+    const addons = () => [draft.upi && { id: "upi", text: draft.upi.text }, draft.gst180 && { id: "gst180", text: draft.gst180.text }].filter(Boolean);
     function syncUpi() {
-      if (!draft.upi) return;
-      const line = draft.upi.text, has = text.value.includes(line);
-      if (upiOn && !has) text.value = `${text.value.replace(/\s+$/, "")}\n\n${line}`;
-      else if (!upiOn && has) text.value = text.value.replace(`\n\n${line}`, "").replace(line, "");
+      for (const a of addons()) {
+        const has = text.value.includes(a.text);
+        if (addOn[a.id] && !has) text.value = `${text.value.replace(/\s+$/, "")}\n\n${a.text}`;
+        else if (!addOn[a.id] && has) text.value = text.value.replace(`\n\n${a.text}`, "").replace(a.text, "");
+      }
     }
     function upiBlock() {
-      if (!draft.upi) return writable() ? note("Add your UPI id in Settings to include a pay-by-UPI line and QR code in reminders.") : null;
-      const box = h("input", { type: "checkbox", id: "s-upi", checked: upiOn });
-      box.addEventListener("change", () => { upiOn = box.checked; syncUpi(); });
-      return h("div", { class: "upi-box" },
-        draft.upi.qr_available ? h("img", { class: "upiqr", src: draft.upi.qr, alt: `UPI QR code for ${draft.upi.id}`, width: 132, height: 132 }) : null,
-        h("div", {}, h("label", { for: "s-upi" }, box, ` Add my UPI details (${draft.upi.id}) to the message`),
-          h("p", { class: "sub", text: "Chat apps rarely make a upi:// link tappable, so the message shows your UPI id and amount. The QR code is for showing on a screen or saving: the customer scans it with any UPI app and the money goes straight to you. UPI per-payment limits apply." })));
+      const blocks = [];
+      if (!draft.upi) { if (writable()) blocks.push(note("Add your UPI id in Settings to include a pay-by-UPI line and QR code in reminders.")); }
+      else {
+        const box = h("input", { type: "checkbox", id: "s-upi", checked: addOn.upi });
+        box.addEventListener("change", () => { addOn.upi = box.checked; syncUpi(); });
+        blocks.push(h("div", { class: "upi-box" },
+          draft.upi.qr_available ? h("img", { class: "upiqr", src: draft.upi.qr, alt: `UPI QR code for ${draft.upi.id}`, width: 132, height: 132 }) : null,
+          h("div", {}, h("label", { for: "s-upi" }, box, ` Add my UPI details (${draft.upi.id}) to the message`),
+            h("p", { class: "sub", text: "Chat apps rarely make a upi:// link tappable, so the message shows your UPI id and amount. The QR code is for showing on a screen or saving: the customer scans it with any UPI app and the money goes straight to you. UPI per-payment limits apply." }))));
+      }
+      if (draft.gst180) {
+        const box = h("input", { type: "checkbox", id: "s-gst", checked: addOn.gst180 });
+        box.addEventListener("change", () => { addOn.gst180 = box.checked; syncUpi(); });
+        blocks.push(h("div", { class: "upi-box" }, h("div", {}, h("label", { for: "s-gst" }, box, " Add the GST 180-day note to the message"),
+          h("p", { class: "sub", text: draft.gst180.caution || "Optional. Check with your CA before using it." }))));
+      }
+      return blocks.length ? h("div", {}, ...blocks) : null;
     }
     function sentPrompt(via) {
       confirm.replaceChildren(h("div", { class: "note" }, h("strong", { text: "Did you send it? " }), "If so, record it so the list knows this customer was contacted.",
@@ -199,7 +214,8 @@
       dupes.length ? ["warn", `Possible duplicate customer names: ${dupes.slice(0, 2).map((g) => g.join(" / ")).join("; ")}${dupes.length > 2 ? ` and ${dupes.length - 2} more` : ""}.`] : null,
       hl.overpaid ? ["warn", `${plural(hl.overpaid, "invoice")} paid more than the amount billed.`] : null,
     ].filter(Boolean);
-    const health = card("c4 r-c12", 9, h("div", { class: "card-head" }, h("h2", { text: "Data health" })),
+    const score = hl.score;
+    const health = card("c4 r-c12", 9, h("div", { class: "card-head" }, h("h2", { text: "Data health" }), score === undefined ? null : h("a", { class: `chip ${score >= 80 ? "pending" : score >= 55 ? "muted" : "broken"}`, href: "#/insights", title: "What lowers the score", text: `${score} / 100` })),
       items.length ? h("ul", { class: "briefing" }, items.map(([lvl, t]) => h("li", { class: `brief ${lvl}` }, icon(lvl === "warn" ? "alert" : "chat"), h("span", { text: t }))))
         : h("div", { class: "empty", text: "Everything looks consistent." }),
       h("a", { class: "btn small ghost", href: "#/import", style: { "margin-top": "12px" } }, icon("import"), "Import a fresh export"));
@@ -221,7 +237,13 @@
     if (CO.extra.customerActions) actions.append(...CO.extra.customerActions(d));
     root.append(back("#/customers", "Customers"), viewHead(d.customer, `As of ${dmy(d.as_of)}`, actions));
     const chips = h("div", { class: "chiprow" }, stageChip(d.stage, d.stage_label, d.stage_why), p.do_not_contact ? h("span", { class: "chip muted", text: "Do not contact" }) : null,
-      s.over_limit ? h("span", { class: "chip broken", text: "Over credit limit" }) : null, d.waiting_reason ? h("span", { class: "chip muted", text: d.waiting_reason }) : null);
+      s.over_limit ? h("span", { class: "chip broken", text: "Over credit limit" }) : null, d.waiting_reason ? h("span", { class: "chip muted", text: d.waiting_reason }) : null,
+      p.group ? h("a", { class: "chip conf medium", href: "#/insights", title: "See this group's combined exposure", text: `Group: ${p.group}` }) : null,
+      ...(() => {
+        const open = (d.cheques || []).filter((c) => c.status === "received" || c.status === "deposited"), bad = (d.cheques || []).filter((c) => c.status === "bounced");
+        return [open.length ? h("a", { class: "chip pending", href: "#/cheques", text: `${plural(open.length, "cheque")} in hand: ${fmt0(open.reduce((a, c) => a + Number(c.amount), 0))}` }) : null,
+          bad.length ? h("a", { class: "chip broken", href: "#/cheques", text: `${plural(bad.length, "cheque")} bounced` }) : null];
+      })());
     const util = s.utilisation === null ? null : Math.min(1, Number(s.utilisation));
 
     const profile = card("c4 r-c12", 0, h("h2", { text: "Who and how", style: { "text-align": "left", "margin-bottom": "12px" } }), chips,
@@ -254,7 +276,8 @@
       })));
     }
     const invRows = d.invoices.map((i) => [
-      h("span", {}, i.invoice_no, i.past_msme_window ? h("span", { class: "chip muted", style: { "margin-left": "8px" }, title: d.msme.caution, text: "MSME 45d" }) : null),
+      h("span", {}, i.invoice_no, i.past_msme_window ? h("span", { class: "chip muted", style: { "margin-left": "8px" }, title: d.msme.caution, text: "MSME 45d" }) : null,
+        i.itc ? h("span", { class: `chip ${i.itc === "past" ? "broken" : "muted"}`, style: { "margin-left": "8px" }, title: d.itc.caution, text: i.itc === "past" ? "GST 180d passed" : "GST 180d near" }) : null),
       dmy(i.invoice_date), i.due_date ? dmy(i.due_date) : "No due date", fmt(i.amount), fmt(i.paid), fmt(i.outstanding),
       h("span", { class: "chip " + ({ overdue: "broken", not_due: "pending", due_today: "pending", paid: "muted", no_due_date: "muted", overpaid: "muted" }[i.status] || "muted"),
         text: { overdue: `${i.days_overdue}d overdue`, not_due: "Not due", due_today: "Due today", paid: "Paid", no_due_date: "No due date", overpaid: "Overpaid" }[i.status] }),

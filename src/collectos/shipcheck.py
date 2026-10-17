@@ -32,7 +32,8 @@ class ShipRules:
 
 
 def ship_check(invoices: list[Invoice], customer: str, order_value: Decimal, as_of: date, credit_limit: Decimal | None = None,
-               kept: int = 0, broken: int = 0, open_disputes: int = 0, do_not_contact: bool = False, rules: ShipRules = ShipRules()) -> dict:
+               kept: int = 0, broken: int = 0, open_disputes: int = 0, do_not_contact: bool = False, rules: ShipRules = ShipRules(),
+               group_elsewhere: tuple[str, Decimal, list[str]] | None = None) -> dict:
     if order_value <= 0:
         raise ValueError("order value must be more than zero")
     key = customer_key(customer)
@@ -84,6 +85,9 @@ def ship_check(invoices: list[Invoice], customer: str, order_value: Decimal, as_
         add(CARE, "warn", f"{open_disputes} invoice{'s are' if open_disputes != 1 else ' is'} in dispute. Settle it or ship knowing it is still open.")
     if do_not_contact:
         add(CARE, "warn", "Marked do-not-contact. Check with whoever set that before shipping.")
+    if group_elsewhere is not None:
+        name, amount, others = group_elsewhere
+        add(CARE, "warn", f"Other firms in the {name} group owe {format_inr(amount)} overdue ({', '.join(others[:3])}{' and more' if len(others) > 3 else ''}). Treat the group's exposure together.")
     if not late:
         reasons.insert(0, {"level": "ok", "text": "Nothing is overdue."})
     verdict = [v for v, s in _SEVERITY.items() if s == level][0]

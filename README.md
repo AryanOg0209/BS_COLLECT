@@ -16,7 +16,7 @@ Codename only; not a registered brand. Status: early build, **not yet validated 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                                  # 658 tests
+.venv/bin/pytest                                  # 739 tests
 
 # Build the whole 10-minute demo kit from synthetic data
 .venv/bin/collectos demo ./demo-kit
@@ -60,6 +60,10 @@ collectos ui --db showcase-kit/demo.db           # opens http://127.0.0.1:8765
 | "Should I offer to waive interest?" | **Interest and waiver offer** at the rate *you* set from your invoice terms: simple interest per invoice, disputed invoices left out, and a draft "pay by this date and we waive it". Wording is for you and your CA to confirm. |
 | Selling to someone who already owes | **Can I ship this order?** Dues, credit limit, broken promises and disputes become ship / ship with care / ask for an advance / hold, with the reasons and the rules shown. It never blocks anything. |
 | "Will we have the cash for salaries?" | A **cash calendar**: money that actually has a date (customers' own promises and invoices due by terms), week by week, firm vs shaky, against your fixed monthly outgoings. Overdue money with no date is listed separately and never counted. |
+| Cheques are how India pays | A **cheque register**: each post-dated cheque from receipt to deposit to cleared or bounced. Dated cheques count in the cash calendar (never on top of the invoice they pay); a bounce opens a follow-up. A cheque in hand never reduces what is owed until the invoice is updated. |
+| "Where did my TDS go?" | A **TDS register** by financial-year quarter with a Form 26AS tick per entry and a CSV download. A record for you and your CA, not tax advice. |
+| Related firms, quiet buyers, bad data | **Insights**: customers grouped by promoter/family with combined exposure and limit, regular buyers who have gone quiet, and a 0-100 **data-health score** with every deduction shown. |
+| GST and MSMED questions | An informational **GST 180-day flag** (Rule 37) with an optional reminder note, and an **MSMED interest estimate** (three times the RBI bank rate you enter, compounded monthly). Both say to confirm with your CA. |
 | Starting the day | A **morning brief** you can paste into WhatsApp: who to call, promises due, broken promises, payments recorded in the last 24 hours. |
 | Away from the screen | A printable **call sheet** with blank columns for what they said. |
 | "What changed, and who did it?" | An **activity** feed over an append-only audit log, plus a one-click backup of the whole database. |

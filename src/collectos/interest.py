@@ -36,6 +36,35 @@ def interest_for(outstanding: Decimal, days_overdue: int, rate_pct: Decimal, gra
     return chargeable, amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+MSMED_APPOINTED_DAYS = 45
+
+
+def msmed_estimate(invoices: list[Invoice], customer: str, as_of: date, bank_rate_pct: Decimal, disputed: set[tuple[str, str]], appointed_days: int = MSMED_APPOINTED_DAYS) -> dict | None:
+    """What the MSMED Act's interest could look like: three times the RBI bank rate, compounded monthly, from the day after the appointed day.
+
+    An estimate to show a CA, not a claim: it assumes the supplier is a registered micro or small enterprise, the buyer is covered, the
+    appointed day is `appointed_days` after the invoice date (45 only if there is a written agreement; 15 otherwise), and uses whole
+    30-day months plus a pro-rata part month. Returns None until the bank rate is entered.
+    """
+    if bank_rate_pct <= 0:
+        return None
+    key = customer_key(customer)
+    monthly = bank_rate_pct * 3 / Decimal(100) / Decimal(12)
+    rows = []
+    for i in sorted((i for i in invoices if customer_key(i.customer) == key and i.outstanding > 0), key=lambda i: (i.invoice_date, i.invoice_no)):
+        delay = (as_of - i.invoice_date).days - appointed_days
+        if delay <= 0 or (i.invoice_no, key) in disputed:
+            continue
+        months, rest = divmod(delay, 30)
+        grown = i.outstanding * (1 + monthly) ** months * (1 + monthly * Decimal(rest) / Decimal(30))
+        amount = (grown - i.outstanding).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        rows.append({"invoice_no": i.invoice_no, "outstanding": f"{i.outstanding:.2f}", "delay_days": delay, "interest": f"{amount:.2f}"})
+    total = sum((Decimal(r["interest"]) for r in rows), _ZERO)
+    return {"bank_rate": f"{bank_rate_pct:.2f}", "rate": f"{bank_rate_pct * 3:.2f}", "appointed_days": appointed_days, "rows": rows, "total": f"{total:.2f}",
+            "note": "An estimate to show your CA, not a claim. It assumes a registered micro or small supplier, a covered buyer and an appointed day of "
+                    f"{appointed_days} days after the invoice date (45 only with a written agreement, otherwise 15). Interest is three times the RBI bank rate, compounded monthly."}
+
+
 def interest_statement(invoices: list[Invoice], customer: str, as_of: date, rate_pct: Decimal, grace_days: int, disputed: set[tuple[str, str]],
                        waiver_days: int = 7, sender: str = "", company: str = "", language: str = "en") -> dict:
     key = customer_key(customer)

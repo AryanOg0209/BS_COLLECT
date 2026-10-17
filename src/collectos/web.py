@@ -15,14 +15,16 @@ All text shown in the page comes from imported files and is untrusted: the clien
 it with textContent only, never as HTML.
 """
 
+import csv
 import html
+import io
 import json
 import re
 import secrets
 import tempfile
 import threading
 import webbrowser
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,7 +37,9 @@ from .contacts import mailto_link, tel_link, whatsapp_link
 from .dates import DateError, parse_date
 from .ai import FIELDS, AiError, AiInputError, AiUnavailable, Assistant
 from .importer import ColumnMap, NoInvoiceTable, import_invoices
-from .interest import interest_statement
+from .insights import dormant_customers, group_overdue_elsewhere, group_summary, health_report
+from .interest import interest_statement, msmed_estimate
+from .itc import CAUTION as ITC_CAUTION, itc_flags, itc_note
 from .matcher import StatementError, parse_statement, suggest
 from .models import customer_key
 from .money import MoneyError, to_money
@@ -45,9 +49,11 @@ from .report import write_owner_report
 from .shipcheck import ship_check
 from .statements import account_statement, write_statement_xlsx
 from .store import Store, StoreError
+from .store_registers import CHEQUE_NEXT, OPEN_CHEQUE
+from .taxcal import fy_quarter, valid_fy
 from .uploads import MAX_UPLOAD, UploadError, UploadStore
 from .upi import clean_note, payment_line, qr_svg, upi_link, valid_vpa
-from .overview import _m, build_overview, customer_detail
+from .overview import _days_since_change, _m, _near_duplicates, build_overview, customer_detail
 from .workqueue import build_queue
 
 WEB_DIR = Path(__file__).parent / "webui"
@@ -62,6 +68,9 @@ APP_LINKS = (
     ("Promises", "promises", "Who promised what, and whether they kept it"),
     ("Cash calendar", "cashflow", "Dated money, week by week, against your outgoings"),
     ("Ship check", "shipcheck", "Check a customer before you dispatch an order"),
+    ("Insights", "insights", "Quiet customers, related firms and how healthy your data is"),
+    ("Cheques", "cheques", "Post-dated cheques: what to deposit, what bounced"),
+    ("TDS register", "tds", "TDS customers deducted, by quarter, to match against Form 26AS"),
     ("Disputes", "disputes", "Disputed invoices, kept out of the chase list"),
     ("Credit", "credit", "Limits, exposure and the credit watch list"),
     ("Reminders", "reminders", "Drafts in English or Hinglish, sent from your own apps"),
@@ -91,6 +100,11 @@ WRITE_ROUTES = {
     "/api/statement/match": ("upload", "_post_statement"),
     "/api/import/layout": ("json", "_post_import_layout"),
     "/api/import/preview-mapped": ("json", "_post_import_preview_mapped"),
+    "/api/cheque/add": ("json", "_post_cheque_add"),
+    "/api/cheque/status": ("json", "_post_cheque_status"),
+    "/api/tds/add": ("json", "_post_tds_add"),
+    "/api/tds/26as": ("json", "_post_tds_26as"),
+    "/api/tds/void": ("json", "_post_tds_void"),
     "/api/ai/reply": ("json", "_post_ai_reply"),
     "/api/ai/columns": ("json", "_post_ai_columns"),
     "/api/ai/remittance": ("upload", "_post_ai_remittance"),
@@ -156,6 +170,14 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(200, Assistant(store, client=self.server.ai_client).status())
             if url.path == "/api/customer":
                 return self._customer(query)
+            if url.path == "/api/insights":
+                return self._insights(query)
+            if url.path == "/api/cheques":
+                return self._cheques(query)
+            if url.path == "/api/tds":
+                return self._tds(query)
+            if url.path == "/tds.csv":
+                return self._tds_csv(query)
             if url.path == "/api/brief":
                 return self._brief(query)
             if url.path == "/api/cashcal":
@@ -270,7 +292,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _post_customer(self, body: dict) -> dict:
         name = _text(body, "customer", required=True)
         changes: dict = {}
-        for key in ("contact_person", "phone", "email", "preferred_channel", "notes"):
+        for key in ("contact_person", "phone", "email", "preferred_channel", "notes", "group"):
             if key in body:
                 changes[key] = _text(body, key, limit=2000)
         if "credit_limit" in body:
@@ -295,6 +317,36 @@ class _Handler(BaseHTTPRequestHandler):
             raise ValueError("id must be a whole number")
         with Store(self.server.db_path) as store:
             store.resolve_dispute(dispute_id, _actor(body), _text(body, "note"))
+        return {"ok": True}
+
+    def _post_cheque_add(self, body: dict) -> dict:
+        with Store(self.server.db_path) as store:
+            cid = store.add_cheque(_text(body, "customer", required=True), _text(body, "cheque_no", required=True), _text(body, "amount", required=True),
+                                   parse_date(_text(body, "cheque_date", required=True)), _actor(body), _text(body, "bank", limit=60),
+                                   _text(body, "invoice_nos", limit=200), _text(body, "note", limit=500))
+        return {"id": cid}
+
+    def _post_cheque_status(self, body: dict) -> dict:
+        with Store(self.server.db_path) as store:
+            c = store.set_cheque_status(_int(body, "id"), _text(body, "status", required=True), _actor(body), _text(body, "note", limit=500))
+        return {"id": c.id, "status": c.status, "customer": c.customer}
+
+    def _post_tds_add(self, body: dict) -> dict:
+        with Store(self.server.db_path) as store:
+            tid = store.add_tds(_text(body, "customer", required=True), parse_date(_text(body, "deducted_on", required=True)), _text(body, "tds", required=True), _actor(body),
+                                _text(body, "invoice_no", limit=60), _text(body, "gross") or None, _text(body, "note", limit=500))
+        return {"id": tid}
+
+    def _post_tds_26as(self, body: dict) -> dict:
+        if not isinstance(body.get("seen"), bool):
+            raise ValueError("seen must be true or false")
+        with Store(self.server.db_path) as store:
+            store.set_tds_26as(_int(body, "id"), body["seen"], _actor(body))
+        return {"ok": True}
+
+    def _post_tds_void(self, body: dict) -> dict:
+        with Store(self.server.db_path) as store:
+            store.void_tds(_int(body, "id"), _actor(body), _text(body, "note", limit=500))
         return {"ok": True}
 
     def _post_setting(self, body: dict) -> dict:
@@ -534,11 +586,13 @@ class _Handler(BaseHTTPRequestHandler):
             invoices = store.invoices()
             draft = draft_for_customer(invoices, store.open_promises(), customer, sender, as_of, language)
             profile = store.customer_profile(customer)
+            itc_on = store.get_setting("itc_flag") == "1"
         blocked = profile.do_not_contact
         owed = sum((a.outstanding for a in (assess(i, as_of) for i in invoices if customer_key(i.customer) == profile.key) if a.status is Status.OVERDUE), _ZERO)
         upi = self._upi_block(query, owed)
+        note = itc_note([f for f in itc_flags(invoices, as_of) if customer_key(f["customer"]) == profile.key], language == "hinglish") if itc_on else None
         self._json(200, {
-            "template": draft.template, "subject": draft.subject, "email": draft.email_body, "whatsapp": draft.whatsapp_text, "language": language, "upi": upi,
+            "template": draft.template, "subject": draft.subject, "email": draft.email_body, "whatsapp": draft.whatsapp_text, "language": language, "upi": upi, "gst180": None if note is None else {"text": note, "caution": ITC_CAUTION},
             "contact": {"person": profile.contact_person, "phone": profile.phone, "email": profile.email, "preferred": profile.preferred_channel,
                         "do_not_contact": blocked},
             # links only open the person's own WhatsApp / mail / phone app with the text filled in; nothing is sent from here
@@ -574,6 +628,69 @@ class _Handler(BaseHTTPRequestHandler):
         return {"id": vpa, "payee": payee, "amount": f"{amount:.2f}", "text": payment_line(vpa, amount, note, hi),
                 "qr": f"/upi-qr.svg?amount={amount:.2f}&note={quote(note, safe='')}", "qr_available": qr_svg("x") is not None}
 
+    def _insights(self, query: dict) -> None:
+        as_of = self._as_of(query)
+        with Store(self.server.db_path) as store:
+            invoices, profiles = store.invoices(), store.customer_profiles()
+            report = health_report(invoices, profiles, _near_duplicates(sorted({i.customer for i in invoices})), as_of, _days_since_change(store, as_of))
+            enabled = store.get_setting("itc_flag") == "1"
+        self._json(200, {"as_of": as_of.isoformat(), "dormant": dormant_customers(invoices, as_of), "groups": group_summary(invoices, profiles, as_of), "health": report,
+                         "itc": {"enabled": enabled, "flags": itc_flags(invoices, as_of) if enabled else [], "caution": ITC_CAUTION}})
+
+    def _cheques(self, query: dict) -> None:
+        as_of = self._as_of(query)
+        with Store(self.server.db_path) as store:
+            rows = store.cheques(query.get("status") or None, query.get("customer") or None)
+            everything = store.cheques()
+            customers = sorted({i.customer for i in store.invoices()}, key=str.casefold)
+        soon = [c for c in everything if c.status == "received" and c.cheque_date <= as_of + timedelta(days=3)]
+        bounced = [c for c in everything if c.status == "bounced"]
+        in_hand = [c for c in everything if c.status in OPEN_CHEQUE and c.status != "bounced"]
+        total = lambda cs: f"{sum((c.amount for c in cs), _ZERO):.2f}"  # noqa: E731
+        self._json(200, {
+            "as_of": as_of.isoformat(), "customers": customers,
+            "cheques": [{"id": c.id, "customer": c.customer, "cheque_no": c.cheque_no, "bank": c.bank, "amount": f"{c.amount:.2f}", "cheque_date": c.cheque_date.isoformat(),
+                         "status": c.status, "invoice_nos": c.invoice_nos, "note": c.note, "days_to_date": (c.cheque_date - as_of).days, "next": list(CHEQUE_NEXT[c.status])}
+                        for c in rows],
+            "summary": {"in_hand": total(in_hand), "in_hand_count": len(in_hand), "due_soon": total(soon), "due_soon_count": len(soon), "bounced": total(bounced), "bounced_count": len(bounced)},
+        })
+
+    def _tds_rows(self, query: dict):
+        as_of = self._as_of(query)
+        fy = query.get("fy") or fy_quarter(as_of)[0]
+        if not valid_fy(fy):
+            raise ValueError("financial year must look like 2026-27")
+        with Store(self.server.db_path) as store:
+            entries = store.tds_entries(fy)
+            years = sorted({e.fy for e in store.tds_entries()} | {fy}, reverse=True)
+            customers = sorted({i.customer for i in store.invoices()}, key=str.casefold)
+        return as_of, fy, entries, years, customers
+
+    def _tds(self, query: dict) -> None:
+        as_of, fy, entries, years, customers = self._tds_rows(query)
+        quarters = []
+        for q in (1, 2, 3, 4):
+            mine = [e for e in entries if e.quarter == q]
+            quarters.append({"quarter": q, "count": len(mine), "total": f"{sum((e.tds for e in mine), _ZERO):.2f}",
+                             "not_in_26as": f"{sum((e.tds for e in mine if not e.in_26as), _ZERO):.2f}", "not_in_26as_count": sum(1 for e in mine if not e.in_26as)})
+        self._json(200, {"fy": fy, "years": years, "customers": customers, "quarters": quarters, "total": f"{sum((e.tds for e in entries), _ZERO):.2f}",
+                         "entries": [{"id": e.id, "customer": e.customer, "invoice_no": e.invoice_no, "deducted_on": e.deducted_on.isoformat(), "quarter": e.quarter,
+                                      "tds": f"{e.tds:.2f}", "gross": None if e.gross is None else f"{e.gross:.2f}", "in_26as": e.in_26as, "note": e.note} for e in entries],
+                         "default_date": as_of.isoformat()})
+
+    def _tds_csv(self, query: dict) -> None:
+        _, fy, entries, _, _ = self._tds_rows(query)
+
+        def safe(value: str) -> str:   # a cell that starts like a formula would run in Excel; make it plain text
+            return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["Financial year", "Quarter", "Date deducted", "Customer", "Invoice", "Gross amount", "TDS deducted", "Seen in Form 26AS", "Note"])
+        for e in entries:
+            w.writerow([fy, f"Q{e.quarter}", e.deducted_on.isoformat(), safe(e.customer), safe(e.invoice_no), "" if e.gross is None else f"{e.gross:.2f}", f"{e.tds:.2f}",
+                        "yes" if e.in_26as else "no", safe(e.note)])
+        self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", {"Content-Disposition": f'attachment; filename="tds-register-{fy}.csv"'})
+
     def _brief(self, query: dict) -> None:
         with Store(self.server.db_path) as store:
             self._json(200, morning_brief(store, self._as_of(query), (query.get("company") or "")[:60]))
@@ -582,7 +699,7 @@ class _Handler(BaseHTTPRequestHandler):
         with Store(self.server.db_path) as store:
             outgoings = to_money(store.get_setting("monthly_outgoings"))
             self._json(200, cash_calendar(store.invoices(), store.open_promises(), store.reliability(self._as_of(query)),
-                                          store.disputed_invoice_keys(), self._as_of(query), outgoings))
+                                          store.disputed_invoice_keys(), self._as_of(query), outgoings, store.cheques()))
 
     def _shipcheck(self, query: dict) -> None:
         name = (query.get("customer") or "").strip()
@@ -602,8 +719,9 @@ class _Handler(BaseHTTPRequestHandler):
             profile = store.customer_profile(known)
             rel = store.reliability(as_of).get(profile.key)
             disputes = [d for d in store.disputes("open") if d.customer_key == profile.key]
+            group = group_overdue_elsewhere(invoices, store.customer_profiles(), known, as_of)
             self._json(200, ship_check(invoices, known, order, as_of, profile.credit_limit, rel.kept if rel else 0, rel.broken if rel else 0,
-                                       len(disputes), profile.do_not_contact))
+                                       len(disputes), profile.do_not_contact, group_elsewhere=group))
 
     def _interest(self, query: dict) -> None:
         name = (query.get("customer") or "").strip()
@@ -618,8 +736,11 @@ class _Handler(BaseHTTPRequestHandler):
             rate, grace = Decimal(store.get_setting("interest_rate")), int(store.get_setting("interest_grace_days"))
             data = interest_statement(store.invoices(), name, self._as_of(query), rate, grace, store.disputed_invoice_keys(), days,
                                       (query.get("sender") or "")[:60], (query.get("company") or "")[:60], language)
-            if store.get_setting("msme_supplier") != "1":
+            msme = store.get_setting("msme_supplier") == "1"
+            if not msme:
                 data.pop("msmed_note", None)
+            elif data.get("configured") is not None:
+                data["msmed"] = msmed_estimate(store.invoices(), data["customer"], self._as_of(query), Decimal(store.get_setting("msmed_bank_rate")), store.disputed_invoice_keys())
             if data.get("configured"):
                 profile = store.customer_profile(data["customer"])
                 draft = data["draft"]
@@ -731,6 +852,13 @@ def _match_remittance(store: Store, result: dict) -> list[dict]:
         else:
             out.append({"invoice_no": line["invoice_no"], "found": False, "ambiguous": len(found) > 1, "notes": ["not found in your invoices" if not found else "more than one customer has this invoice number"]})
     return out
+
+
+def _int(body: dict, key: str) -> int:
+    value = body.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be a whole number")
+    return value
 
 
 def _text(body: dict, key: str, required: bool = False, limit: int = 2000) -> str:

@@ -67,6 +67,9 @@
     edit: ["M4 20h4L19 9l-4-4L4 16z", "M13 7l4 4"],
     check: ["M5 12l5 5 9-10"],
     link: ["M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1", "M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"],
+    insights: ["M12 3a6 6 0 0 0-3.5 10.9V17h7v-3.1A6 6 0 0 0 12 3z", "M9.5 21h5"],
+    cheque: ["M3 6h18v12H3z", "M7 10h5", "M7 14h3", "M15 14h2"],
+    tds: ["M6 3h9l4 4v14H6z", "M14 3v5h5", "M9.5 17l5-5", "M9.5 12h.01", "M14.5 17h.01"],
     money: ["M3 7h18v10H3z", "M12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z", "M6 10v4", "M18 10v4"],
   };
   function icon(name, cls = "ico") {
@@ -111,7 +114,7 @@
     chartMode: "age", calYM: null, calSel: null, filter: "", remindFor: null, trendMetric: "overdue",
   };
   // Sidebar order. Screens registered by features.js slot in by id; ids not listed here are reachable by link only.
-  const NAV_ORDER = ["dashboard", "queue", "customers", "promises", "cashflow", "shipcheck", "disputes", "credit", "reminders", "import", "payments", "trend", "activity", "settings"];
+  const NAV_ORDER = ["dashboard", "queue", "customers", "promises", "cashflow", "shipcheck", "insights", "cheques", "tds", "disputes", "credit", "reminders", "import", "payments", "trend", "activity", "settings"];
   const NAV = [
     ["dashboard", "Dashboard", "dashboard"], ["queue", "Work Queue", "queue"], ["customers", "Customers", "customers"],
     ["promises", "Promises", "promises"], ["reminders", "Reminders", "reminders"], ["trend", "Trend", "trend"], ["settings", "Settings", "settings"],

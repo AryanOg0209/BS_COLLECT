@@ -516,3 +516,14 @@ ul.weekitems li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap
 .homelink { display: flex; align-items: center; min-height: 44px; padding: 0 14px; margin: 0 4px 8px; border-radius: 12px; color: var(--muted); text-decoration: none; font-size: 14px; }
 .homelink:hover { color: var(--text); background: rgba(255, 255, 255, 0.07); }
 .app[data-collapsed="true"] .homelink { font-size: 0; padding: 0; justify-content: center; } .app[data-collapsed="true"] .homelink::before { content: "\2190"; font-size: 18px; }
+
+/* ---- insights, cheques, TDS ---- */
+.scorering { --p: 0; width: 132px; height: 132px; border-radius: 50%; margin: 6px auto 0; display: grid; place-items: center; background: conic-gradient(var(--teal) calc(var(--p) * 1%), rgba(255, 255, 255, 0.1) 0); }
+.scorein { width: 100px; height: 100px; border-radius: 50%; background: #17171f; display: grid; place-items: center; align-content: center; }
+.scorein b { font-size: 34px; line-height: 1; } .scorein small { color: var(--muted); font-size: 11px; }
+.groups { display: flex; flex-direction: column; gap: 18px; margin-top: 12px; } .group { padding: 14px 16px; border-radius: 16px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line); }
+.group h3 { margin: 0; font-size: 18px; } .msmed { margin-top: 16px; } .msmed h3 { font-size: 16px; margin: 0 0 8px; }
+a.chip { text-decoration: none; }
+
+.ckactions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.head-actions select { min-height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(0, 0, 0, 0.3); color: var(--text); cursor: pointer; }

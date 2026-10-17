@@ -111,6 +111,11 @@ class RegistersMixin:
             raise StoreError(f"unknown customer {name!r}")
         return row["customer"]
 
+    def last_invoice_change_ts(self) -> str | None:
+        """When the invoice data last changed (an import or a confirmed settlement), or None if it never has."""
+        row = self._db.execute("SELECT MAX(ts) AS ts FROM audit_log WHERE entity = 'invoice' AND action IN ('invoice.created', 'invoice.updated', 'invoice.settled')").fetchone()
+        return row["ts"]
+
     # ---- post-dated cheques ------------------------------------------------------------------
 
     @staticmethod

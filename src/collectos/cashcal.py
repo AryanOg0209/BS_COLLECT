@@ -1,10 +1,12 @@
 """Cash calendar: money that has a date attached, week by week, against a fixed monthly outgoing.
 
 This is a planning view, not a forecast. It counts only
+  * a post-dated cheque in hand (on its date; a cheque dated in the past counts today, as it can be deposited now),
   * a customer's own open promise (date and amount they gave), and
   * invoices not yet due, on their due date.
+A cheque is never counted on top of the invoice it pays: each customer's counted money is capped at what they owe.
 Each is "firm" or "shaky": shaky when the customer has broken more promises than kept, or is already
-more than 30 days late on something else. Overdue money with no promise date is never counted; it is
+more than 30 days late on something else; a cheque is shaky only if that customer has a bounced cheque. Overdue money with no promise date is never counted; it is
 listed separately so nobody mistakes it for incoming cash. Invoices in dispute are left out.
 """
 
@@ -31,7 +33,7 @@ class _Item:
 
 
 def cash_calendar(invoices: list[Invoice], promises: list[Promise], reliability: dict, disputed: set[tuple[str, str]], as_of: date,
-                  monthly_outgoings: Decimal = _ZERO) -> dict:
+                  monthly_outgoings: Decimal = _ZERO, cheques: list = ()) -> dict:
     horizon = as_of + timedelta(days=WEEKS * 7)
     by_customer: dict[str, list] = defaultdict(list)
     for i in invoices:
@@ -43,6 +45,7 @@ def cash_calendar(invoices: list[Invoice], promises: list[Promise], reliability:
 
     items: list[_Item] = []
     no_amount = 0
+    absorbed_overdue: dict[str, Decimal] = {}
     for key, assessments in by_customer.items():
         name = assessments[0].invoice.customer
         rel = reliability.get(key)
@@ -50,8 +53,26 @@ def cash_calendar(invoices: list[Invoice], promises: list[Promise], reliability:
         kept = rel.kept if rel else 0
         oldest = max((a.days_overdue for a in assessments if a.status is Status.OVERDUE), default=0)
         firm = not (broken > kept or oldest > SHAKY_LATE_DAYS)
-        overdue_total = sum((a.outstanding for a in assessments if a.status is Status.OVERDUE), _ZERO)
-        room = overdue_total   # a promise is about overdue money; never count more than is overdue
+        room = sum((a.outstanding for a in assessments if a.status is Status.OVERDUE), _ZERO)   # a promise is about overdue money
+        not_due = sorted(([a.invoice.due_date, a.outstanding] for a in assessments
+                          if a.status in (Status.NOT_DUE, Status.DUE_TODAY) and a.invoice.due_date is not None), key=lambda e: e[0])
+        mine = [c for c in cheques if c.customer_key == key]
+        bounced_now = any(c.status == "bounced" for c in mine)
+        for c in sorted((c for c in mine if c.status in ("received", "deposited")), key=lambda c: c.cheque_date):
+            on = max(c.cheque_date, as_of)
+            if on >= horizon:
+                continue
+            take = min(c.amount, room)
+            room -= take
+            absorbed_overdue[key] = absorbed_overdue.get(key, _ZERO) + take
+            rest = c.amount - take
+            for entry in not_due:           # whatever the cheque cannot cover of the overdue money pays the next invoices due
+                t = min(rest, entry[1])
+                entry[1] -= t
+                rest -= t
+            counted = c.amount - rest
+            if counted > 0:
+                items.append(_Item(on, name, counted, "cheque", not bounced_now))
         for p in sorted((p for p in promises if p.customer_key == key and as_of <= p.promised_date < horizon), key=lambda p: p.promised_date):
             if p.promised_amount is None:
                 no_amount += 1
@@ -60,9 +81,9 @@ def cash_calendar(invoices: list[Invoice], promises: list[Promise], reliability:
             if amount > 0:
                 room -= amount
                 items.append(_Item(p.promised_date, name, amount, "promise", firm))
-        for a in assessments:
-            if a.status in (Status.NOT_DUE, Status.DUE_TODAY) and a.invoice.due_date is not None and as_of <= a.invoice.due_date < horizon:
-                items.append(_Item(a.invoice.due_date, name, a.outstanding, "terms", firm))
+        for due, amount in not_due:
+            if amount > 0 and as_of <= due < horizon:
+                items.append(_Item(due, name, amount, "terms", firm))
 
     weeks = []
     for w in range(WEEKS):
@@ -84,8 +105,9 @@ def cash_calendar(invoices: list[Invoice], promises: list[Promise], reliability:
         if not late:
             continue
         dated = any(p.customer_key == key and as_of <= p.promised_date < horizon and p.promised_amount for p in promises)
-        if not dated:
-            undated.append((sum((a.outstanding for a in late), _ZERO), assessments[0].invoice.customer, max(a.days_overdue for a in late)))
+        left = sum((a.outstanding for a in late), _ZERO) - absorbed_overdue.get(key, _ZERO)
+        if not dated and left > 0:
+            undated.append((left, assessments[0].invoice.customer, max(a.days_overdue for a in late)))
     undated.sort(key=lambda t: -t[0])
     out_14 = (monthly_outgoings * Decimal(14) / Decimal(30)).quantize(Decimal("0.01"))
     return {

@@ -12,6 +12,8 @@ from .ageing import CURRENT, DEFAULT_EDGES, NO_DUE_DATE, Status, assess, bucket_
 from .matcher import STOPWORDS
 from .models import customer_key
 from .money import format_inr
+from .insights import dormant_customers, health_report
+from .itc import CAUTION as ITC_CAUTION, itc_flags, itc_state
 from .msme import CAUTION, MSME_DAYS, past_msme_window
 from .store import Store
 from .store_extras import CustomerProfile
@@ -27,7 +29,7 @@ def _m(value: Decimal | None) -> str | None:
 def _contact(p: CustomerProfile | None) -> dict:
     p = p or CustomerProfile("", "")
     return {"person": p.contact_person, "phone": p.phone, "email": p.email, "preferred": p.preferred_channel,
-            "do_not_contact": p.do_not_contact, "credit_limit": _m(p.credit_limit), "notes": p.notes}
+            "do_not_contact": p.do_not_contact, "credit_limit": _m(p.credit_limit), "notes": p.notes, "group": p.group}
 
 
 def _queue_inputs(store: Store, as_of: date):
@@ -62,6 +64,11 @@ def _near_duplicates(names: list[str]) -> list[list[str]]:
         if tokens:
             groups.setdefault(tokens, []).append(n)
     return [sorted(v) for v in groups.values() if len(v) > 1]
+
+
+def _days_since_change(store: Store, as_of: date) -> int | None:
+    ts = store.last_invoice_change_ts()
+    return None if ts is None else max(0, (as_of - date.fromisoformat(ts[:10])).days)
 
 
 def build_overview(store: Store, as_of: date, db_name: str = "") -> dict:
@@ -105,6 +112,14 @@ def build_overview(store: Store, as_of: date, db_name: str = "") -> dict:
         "near_duplicate_names": _near_duplicates(sorted({i.customer for i in invoices})),
         "top_queue_without_contact": len(missing_contact),
     }
+    health_rep = health_report(invoices, profiles, health["near_duplicate_names"], as_of, _days_since_change(store, as_of))
+    health["score"] = health_rep["score"]
+    itc_on = store.get_setting("itc_flag") == "1"
+    flags = itc_flags(invoices, as_of) if itc_on else []
+    cheques = store.cheques()
+    cheques_soon = [c for c in cheques if c.status == "received" and c.cheque_date <= as_of + timedelta(days=3)]
+    cheques_bounced = [c for c in cheques if c.status == "bounced"]
+    dormant = dormant_customers(invoices, as_of)
     kpi = {
         "total_outstanding": _m(total_outstanding), "overdue": _m(total_overdue),
         "overdue_share": None if total_outstanding == 0 else f"{total_overdue / total_outstanding:.4f}",
@@ -117,11 +132,12 @@ def build_overview(store: Store, as_of: date, db_name: str = "") -> dict:
         "over_limit": len(over_limit), "review_credit": len(review),
         "msme_past_window": len(msme), "msme_past_window_amount": _m(sum((i.outstanding for i in msme), _ZERO)) if msme_on else None,
         "likely_paid_promises": len(suggestions),
+        "itc_flagged": len(flags), "cheques_due_soon": len(cheques_soon), "cheques_bounced": len(cheques_bounced), "dormant_customers": len(dormant),
     }
     return {
         "as_of": as_of.isoformat(), "db_name": db_name, "kpi": kpi, "health": health, "ageing": ageing,
-        "settings": {"msme_supplier": msme_on, "msme_caution": CAUTION, "msme_days": MSME_DAYS,
-                     **{k: store.get_setting(k) for k in ("upi_id", "payee_name", "interest_rate", "interest_grace_days", "monthly_outgoings")}},
+        "settings": {"msme_supplier": msme_on, "msme_caution": CAUTION, "msme_days": MSME_DAYS, "itc_caution": ITC_CAUTION,
+                     **{k: store.get_setting(k) for k in ("upi_id", "payee_name", "interest_rate", "interest_grace_days", "monthly_outgoings", "itc_flag", "msmed_bank_rate")}},
         "trend": [{"as_of": s.as_of.isoformat(), "total_outstanding": _m(s.total_outstanding), "overdue": _m(s.overdue), "over60": _m(s.over60),
                    "over90": _m(s.over90), "followups_7d": s.followups_7d, "broken_promises": s.broken_promises, "payments_observed": _m(s.payments_observed)}
                   for s in snapshots],
@@ -151,8 +167,26 @@ def build_overview(store: Store, as_of: date, db_name: str = "") -> dict:
         ],
         "followups": [{"customer": f.customer, "ts": f.ts, "channel": f.channel, "outcome": f.outcome, "actor": f.actor}
                       for f in reversed(store.followups()[-15:])],
-        "briefing": _briefing(queue, kpi, health, open_disputes, over_limit, review, suggestions, soon, msme_on),
+        "briefing": _briefing(queue, kpi, health, open_disputes, over_limit, review, suggestions, soon, msme_on)
+        + _extra_briefing(cheques_soon, cheques_bounced, dormant, flags),
     }
+
+
+def _extra_briefing(cheques_soon, cheques_bounced, dormant, flags) -> list[dict]:
+    out = []
+    if cheques_bounced:
+        out.append({"kind": "bounced", "level": "warn", "view": "cheques",
+                    "text": f"{_plural(len(cheques_bounced), 'cheque')} bounced ({format_inr(sum((c.amount for c in cheques_bounced), _ZERO))}). Follow up and decide whether to present again."})
+    if cheques_soon:
+        out.append({"kind": "cheques", "level": "info", "view": "cheques",
+                    "text": f"{_plural(len(cheques_soon), 'cheque')} ready to deposit in the next 3 days ({format_inr(sum((c.amount for c in cheques_soon), _ZERO))})."})
+    if dormant:
+        out.append({"kind": "dormant", "level": "info", "view": "insights", "text": f"{_plural(len(dormant), 'regular customer')} have gone quiet: no new invoice for much longer than their usual gap."})
+    if flags:
+        past = sum(1 for f in flags if f["state"] == "past")
+        out.append({"kind": "itc", "level": "info", "view": "insights",
+                    "text": f"{_plural(len(flags), 'open invoice')} {'is' if len(flags) == 1 else 'are'} near or past the 180-day GST mark ({past} past it). {ITC_CAUTION}"})
+    return out
 
 
 def _dispute(d) -> dict:
@@ -222,6 +256,8 @@ def customer_detail(store: Store, name: str, as_of: date) -> dict:
     item = next((q for q in queue.work if customer_key(q.customer) == key), None)
     waiting = next((w.reason for w in queue.waiting if customer_key(w.customer) == key), None)
     msme_on = store.get_setting("msme_supplier") == "1"
+    itc_on = store.get_setting("itc_flag") == "1"
+    cheques = store.cheques(customer=display)
 
     outstanding = summary.outstanding if summary else _ZERO
     overdue_amt = summary.overdue if summary else _ZERO
@@ -250,7 +286,8 @@ def customer_detail(store: Store, name: str, as_of: date) -> dict:
              "status": r.status.value, "days_overdue": r.days_overdue, "bucket": r.bucket, "partial": r.is_partial,
              "dispute": None if r.invoice.invoice_no not in open_disputes else
              {"id": open_disputes[r.invoice.invoice_no].id, "category": open_disputes[r.invoice.invoice_no].category},
-             "past_msme_window": bool(msme_on and r.outstanding > 0 and (as_of - r.invoice.invoice_date).days > MSME_DAYS)}
+             "past_msme_window": bool(msme_on and r.outstanding > 0 and (as_of - r.invoice.invoice_date).days > MSME_DAYS),
+             "itc": itc_state(r.invoice.invoice_date, as_of) if itc_on and r.outstanding > 0 else None}
             for r in sorted(results, key=lambda r: (r.status is Status.PAID, -r.days_overdue, r.invoice.invoice_no))
         ],
         "followups": [{"ts": f.ts, "channel": f.channel, "outcome": f.outcome, "note": f.note, "actor": f.actor}
@@ -263,4 +300,6 @@ def customer_detail(store: Store, name: str, as_of: date) -> dict:
         "suggestions": [{"promise_id": s.promise.id, "kind": s.kind, "observed": _m(s.observed)} for s in suggestions],
         "disputes": [_dispute(d) for d in disputes],
         "msme": {"enabled": msme_on, "caution": CAUTION},
+        "itc": {"enabled": itc_on, "caution": ITC_CAUTION},
+        "cheques": [{"id": c.id, "cheque_no": c.cheque_no, "bank": c.bank, "amount": _m(c.amount), "cheque_date": c.cheque_date.isoformat(), "status": c.status} for c in cheques],
     }
