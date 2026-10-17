@@ -21,8 +21,9 @@ from .importer import ImportReport
 from .models import Invoice, Promise, customer_key
 from .money import from_paise, to_money, to_paise
 from .store_extras import SCHEMA_V4, SCHEMA_V5, ExtrasMixin
+from .store_registers import SCHEMA_V6, RegistersMixin
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA_V1 = """
 CREATE TABLE imports (
@@ -132,7 +133,7 @@ CREATE TRIGGER snapshots_no_delete BEFORE DELETE ON snapshots
 BEGIN SELECT RAISE(ABORT, 'snapshots is append-only'); END;
 """
 
-_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V5}
+_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V5, 6: SCHEMA_V6}
 
 
 @dataclass
@@ -198,7 +199,7 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class Store(ExtrasMixin):
+class Store(ExtrasMixin, RegistersMixin):
     def __init__(self, path: str | Path = ":memory:", now: Callable[[], datetime] = _utc_now):
         self._now = now
         self._db = sqlite3.connect(str(path))

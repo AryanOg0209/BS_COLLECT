@@ -78,7 +78,8 @@ BEGIN SELECT RAISE(ABORT, 'ai_usage is append-only'); END;
 DISPUTE_CATEGORIES = ("price", "quantity", "quality", "delivery", "tax", "duplicate", "other")
 CHANNEL_PREFERENCES = ("", "call", "whatsapp", "email", "visit")
 SETTING_DEFAULTS = {"msme_supplier": "0", "default_country_code": "91", "ai_assist": "0", "ai_budget_usd": "2.00", "ai_usd_inr": "90.00",
-                    "upi_id": "", "payee_name": "", "interest_rate": "0.00", "interest_grace_days": "0", "monthly_outgoings": "0.00"}
+                    "upi_id": "", "payee_name": "", "interest_rate": "0.00", "interest_grace_days": "0", "monthly_outgoings": "0.00",
+                    "itc_flag": "0", "msmed_bank_rate": "0.00"}
 _PAYMENT_ACTIONS = ("invoice.updated", "invoice.settled")
 _UNSET = object()
 
@@ -94,6 +95,7 @@ class CustomerProfile:
     credit_limit: Decimal | None = None
     do_not_contact: bool = False
     notes: str = ""
+    group: str = ""
 
 
 @dataclass(frozen=True)
@@ -188,7 +190,9 @@ class ExtrasMixin:
             raise StoreError("default_country_code must be 1 to 3 digits")
         if key == "ai_assist" and value not in ("0", "1"):
             raise StoreError("ai_assist must be 0 or 1")
-        if key in ("ai_budget_usd", "ai_usd_inr", "interest_rate", "monthly_outgoings"):
+        if key == "itc_flag" and value not in ("0", "1"):
+            raise StoreError("itc_flag must be 0 or 1")
+        if key in ("ai_budget_usd", "ai_usd_inr", "interest_rate", "monthly_outgoings", "msmed_bank_rate"):
             value = self._money_setting(key, value)
         if key == "upi_id" and value and not valid_vpa(value):
             raise StoreError("upi_id must look like name@bank (letters, digits, dots, dashes)")
@@ -207,7 +211,7 @@ class ExtrasMixin:
 
     @staticmethod
     def _money_setting(key: str, value: str) -> str:
-        low, high = {"ai_budget_usd": (Decimal("0"), Decimal("100")), "interest_rate": (Decimal("0"), Decimal("60")),
+        low, high = {"ai_budget_usd": (Decimal("0"), Decimal("100")), "interest_rate": (Decimal("0"), Decimal("60")), "msmed_bank_rate": (Decimal("0"), Decimal("30")),
                      "monthly_outgoings": (Decimal("0"), Decimal("10000000000"))}.get(key, (Decimal("1"), Decimal("500")))
         try:
             number = Decimal(value)
@@ -251,7 +255,8 @@ class ExtrasMixin:
             return CustomerProfile(fallback_key, fallback_name)
         return CustomerProfile(
             row["customer_key"], row["display_name"], row["contact_person"], row["phone"], row["email"], row["preferred_channel"],
-            None if row["credit_limit_paise"] is None else from_paise(row["credit_limit_paise"]), bool(row["do_not_contact"]), row["notes"])
+            None if row["credit_limit_paise"] is None else from_paise(row["credit_limit_paise"]), bool(row["do_not_contact"]), row["notes"],
+            row["group_name"])
 
     def customer_profile(self, name: str) -> CustomerProfile:
         display = self._known_customer(name)
@@ -266,7 +271,7 @@ class ExtrasMixin:
 
         Only the fields passed are changed. credit_limit=None clears the limit.
         """
-        allowed = {"contact_person", "phone", "email", "preferred_channel", "credit_limit", "do_not_contact", "notes"}
+        allowed = {"contact_person", "phone", "email", "preferred_channel", "credit_limit", "do_not_contact", "notes", "group"}
         unknown = set(changes) - allowed
         if unknown:
             raise StoreError(f"cannot change: {', '.join(sorted(unknown))}")
@@ -275,13 +280,13 @@ class ExtrasMixin:
         new = {
             "contact_person": current.contact_person, "phone": current.phone, "email": current.email,
             "preferred_channel": current.preferred_channel, "credit_limit": current.credit_limit,
-            "do_not_contact": current.do_not_contact, "notes": current.notes,
+            "do_not_contact": current.do_not_contact, "notes": current.notes, "group": current.group,
         }
         try:
             for field_name, value in changes.items():
-                if field_name in ("contact_person", "notes"):
-                    value = str(value or "").strip()
-                    if len(value) > (120 if field_name == "contact_person" else 2000):
+                if field_name in ("contact_person", "notes", "group"):
+                    value = " ".join(str(value or "").split()) if field_name == "group" else str(value or "").strip()
+                    if len(value) > (2000 if field_name == "notes" else 120):
                         raise ValueError(f"{field_name} is too long")
                 elif field_name == "phone":
                     value = normalise_phone(str(value or ""), self.get_setting("default_country_code"))
@@ -313,12 +318,12 @@ class ExtrasMixin:
         with self._db:
             self._db.execute(
                 "INSERT INTO customers (customer_key, display_name, contact_person, phone, email, preferred_channel, "
-                "credit_limit_paise, do_not_contact, notes, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "credit_limit_paise, do_not_contact, notes, group_name, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(customer_key) DO UPDATE SET contact_person=excluded.contact_person, phone=excluded.phone, "
                 "email=excluded.email, preferred_channel=excluded.preferred_channel, credit_limit_paise=excluded.credit_limit_paise, "
-                "do_not_contact=excluded.do_not_contact, notes=excluded.notes, updated_ts=excluded.updated_ts",
+                "do_not_contact=excluded.do_not_contact, notes=excluded.notes, group_name=excluded.group_name, updated_ts=excluded.updated_ts",
                 (key, display, new["contact_person"], new["phone"], new["email"], new["preferred_channel"],
-                 None if new["credit_limit"] is None else to_paise(new["credit_limit"]), int(new["do_not_contact"]), new["notes"], ts))
+                 None if new["credit_limit"] is None else to_paise(new["credit_limit"]), int(new["do_not_contact"]), new["notes"], new["group"], ts))
             self._audit(ts, actor, "customer.updated", None, before, after, "", entity="customer")
         return self.customer_profile(name)
 
