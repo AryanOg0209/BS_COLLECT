@@ -16,7 +16,7 @@ Codename only; not a registered brand. Status: early build, **not yet validated 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                                  # 633 tests
+.venv/bin/pytest                                  # 658 tests
 
 # Build the whole 10-minute demo kit from synthetic data
 .venv/bin/collectos demo ./demo-kit
@@ -90,6 +90,13 @@ verify the key, model and response format and prints the cost (never the key). S
 data* (increases in recorded paid amounts that arrived via imports since the previous snapshot, read from the
 audit log). These numbers are descriptive: they do not prove that follow-up work caused any change, and
 invoices that merely disappear from an export are not counted as payments.
+
+## Website
+A self-contained, accessible 3D marketing page lives in `site/` (plain HTML, CSS and a little JavaScript; no external requests, no pricing, synthetic screenshots only).
+```bash
+python3 -m http.server 8830 -d site       # then open http://127.0.0.1:8830
+```
+Before publishing it anywhere, replace the placeholder address `hello@collectos.example` in `site/index.html` with a real contact.
 
 ## Layers
 | # | Layer | Module(s) | Status |

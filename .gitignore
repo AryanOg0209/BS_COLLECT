@@ -30,3 +30,9 @@ demo-kit/
 
 # Commercial material (pricing, outreach, prospect lists) must never be pushed to a public repo
 sales-kit/
+
+# Third-party Claude Code skills (nextlevelbuilder/ui-ux-pro-max-skill, MIT). Local tools, not part of this project.
+.claude/skills/
+
+# Local MCP tool config (reads API_KEY_21ST from your environment; never put the key in this file)
+.mcp.json
